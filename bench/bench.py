@@ -1,7 +1,8 @@
 """A/B benchmark driver: alternates SimPy trees in fresh subprocesses.
 
 Usage: python bench/bench.py [--rounds N] [--only w1,w2] TREE [TREE ...]
-TREE is a label=path pair, e.g. base=upstream/src opt=src.
+TREE is label=path or label=path@python, e.g. base=upstream/src opt=src
+new=src@venv/Scripts/python.exe runs that tree under another interpreter.
 
 Prints, per workload, the median seconds, range and speedup vs the first tree,
 and fails if any tree's trace digest differs from the first tree's.
@@ -28,7 +29,9 @@ runs = {label: [] for label, _ in trees}
 for r in range(args.rounds):
     order = trees if r % 2 == 0 else trees[::-1]
     for label, path in order:
-        cmd = [sys.executable, os.path.join(HERE, 'run_one.py'), path, *only]
+        tree, _, exe = path.partition('@')
+        cmd = [exe or sys.executable, os.path.join(HERE, 'run_one.py'), tree,
+               *only]
         res = json.loads(subprocess.run(
             cmd, check=True, capture_output=True, text=True).stdout)
         runs[label].append(res)
