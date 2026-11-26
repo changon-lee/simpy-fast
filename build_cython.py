@@ -14,7 +14,7 @@ from Cython.Build import cythonize
 from setuptools import Extension
 from setuptools.dist import Distribution
 
-from cython_config import DIRECTIVES, MODULES, lazy_instance_dicts
+from cython_config import DIRECTIVES, MODULES, patch_generated_c
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else
@@ -30,7 +30,7 @@ exts = [
     for m in MODULES
 ]
 ext_modules = cythonize(exts, quiet=True, compiler_directives=DIRECTIVES)
-lazy_instance_dicts(ext_modules, pkg_out)
+patch_generated_c(ext_modules, pkg_out)
 dist = Distribution({'ext_modules': ext_modules})
 cmd = dist.get_command_obj('build_ext')
 cmd.inplace = False

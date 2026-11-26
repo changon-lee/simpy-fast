@@ -62,6 +62,63 @@ static inline int simpy_plain_type(PyObject *obj, PyTypeObject *base,
     return _PyType_Lookup(tp, name) == descr;
 }
 
+/* 1 when obj has no instance attribute `name`, decided without running
+ * Python code: it has no instance dict, or a small exact dict whose keys are
+ * all exact str and none equals `name`. 0 when it may have one. */
+static inline int simpy_no_instance_attr(PyObject *obj, PyObject *name)
+{
+    PyTypeObject *tp = Py_TYPE(obj);
+    Py_ssize_t off, len, pos = 0;
+    PyObject *dict, *key, *value;
+
+#ifdef Py_TPFLAGS_MANAGED_DICT
+    if (tp->tp_flags & Py_TPFLAGS_MANAGED_DICT)
+        return 0;
+#endif
+    off = tp->tp_dictoffset;
+    if (off == 0)
+        return 1;
+    if (off < 0)
+        return 0;
+    dict = *(PyObject **)((char *)obj + off);
+    if (dict == NULL)
+        return 1;
+    if (!PyDict_CheckExact(dict) || PyDict_GET_SIZE(dict) > 8)
+        return 0;
+    len = PyUnicode_GET_LENGTH(name);
+    while (PyDict_Next(dict, &pos, &key, &value)) {
+        if (key == name || !PyUnicode_CheckExact(key))
+            return 0;
+        if (PyUnicode_GET_LENGTH(key) == len && PyUnicode_Compare(key, name) == 0)
+            return 0;
+    }
+    return 1;
+}
+
+/* For Cython's cpdef methods (the build inserts the call, see
+ * cython_config.py). When C code calls one, Cython looks up
+ * getattr(obj, name), which allocates a bound method, and runs the C body
+ * only if that is a method of the cpdef wrapper, whose C function is
+ * `cfunc`. This proves the same without the lookup: attribute access is the
+ * generic one, the class attribute found is that wrapper, a Cython function
+ * (`cyfunc_type`, which getattr binds to obj), and no instance attribute
+ * hides it. 0 leaves the decision to Cython's own check. */
+static inline int simpy_cpdef_plain(PyObject *obj, PyObject *name,
+                                    void (*cfunc)(void),
+                                    PyTypeObject *cyfunc_type)
+{
+    PyTypeObject *tp = Py_TYPE(obj);
+    PyObject *descr;
+
+    if (tp->tp_getattro != PyBaseObject_Type.tp_getattro)
+        return 0;
+    descr = _PyType_Lookup(tp, name);
+    if (descr == NULL || Py_TYPE(descr) != cyfunc_type ||
+            ((PyCFunctionObject *)descr)->m_ml->ml_meth != (PyCFunction)cfunc)
+        return 0;
+    return simpy_no_instance_attr(obj, name);
+}
+
 /* The class that follows `cls` in the MRO of type(obj) (borrowed), or NULL.
  * super(cls, obj).<name> finds the first class after `cls` that defines
  * <name>; when that next class is a compiled (immutable) type which defines

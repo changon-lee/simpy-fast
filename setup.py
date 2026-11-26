@@ -8,7 +8,7 @@ import os
 from Cython.Build import cythonize
 from setuptools import Extension, find_packages, setup
 
-from cython_config import DIRECTIVES, MODULES, lazy_instance_dicts
+from cython_config import DIRECTIVES, MODULES, patch_generated_c
 
 exts = [
     Extension(m, [os.path.join('src', *m.split('.')) + '.pyx'],
@@ -16,7 +16,7 @@ exts = [
     for m in MODULES
 ]
 ext_modules = cythonize(exts, quiet=True, compiler_directives=DIRECTIVES)
-lazy_instance_dicts(ext_modules, os.path.join('src', 'simpy'))
+patch_generated_c(ext_modules, os.path.join('src', 'simpy'))
 
 setup(
     name='simpy',

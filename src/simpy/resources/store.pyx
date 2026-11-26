@@ -22,6 +22,9 @@ from typing import (
 cimport cython
 
 from simpy.events cimport register_state_fields
+
+cdef extern from "_cfast.h":
+    pass  # declares the helpers that the generated code calls
 from simpy.core import BoundClass, Environment
 from simpy.resources import base
 

@@ -1253,6 +1253,112 @@ def instance_dicts():
 
 
 probe('instance dicts', instance_dicts)
+
+
+def cpdef_overrides():
+    # Every way a Python-level _do_put/_do_get/_trigger_*/succeed can replace
+    # the built-in one, as seen by the resource machinery.
+    log = []
+
+    class LogResource(simpy.Resource):
+        def _do_put(self, event):
+            log.append(('sub _do_put', type(event).__name__))
+            return super()._do_put(event)
+
+        def _trigger_get(self, put_event):
+            log.append(('sub _trigger_get', type(put_event).__name__))
+            return super()._trigger_get(put_event)
+
+    def run(res_factory, tweak=None):
+        env = simpy.Environment()
+        res = res_factory(env)
+        if tweak:
+            tweak(res)
+
+        def user(i):
+            with res.request() as req:
+                yield req
+                log.append(('got', i, env.now))
+                yield env.timeout(1)
+
+        for i in range(3):
+            env.process(user(i))
+        env.run()
+
+    run(lambda env: LogResource(env, 1))
+
+    def shadow_do_put(res):
+        orig = res._do_put
+
+        def _do_put(event):
+            log.append(('inst _do_put', type(event).__name__))
+            return orig(event)
+        res._do_put = _do_put
+
+    run(lambda env: simpy.Resource(env, 1), shadow_do_put)
+
+    def shadow_trigger_put(res):
+        orig = res._trigger_put
+
+        def _trigger_put(get_event):
+            log.append(('inst _trigger_put', get_event is None))
+            return orig(get_event)
+        res._trigger_put = _trigger_put
+
+    run(lambda env: simpy.Resource(env, 2), shadow_trigger_put)
+
+    def big_dict(res):
+        for k in range(12):
+            setattr(res, f'attr{k}', k)
+        shadow_do_put(res)
+
+    run(lambda env: simpy.Resource(env, 1), big_dict)
+
+    def odd_key(res):
+        vars(res)[7] = 'int key'
+        shadow_do_put(res)
+
+    run(lambda env: simpy.Resource(env, 1), odd_key)
+
+    def big_dict_plain(res):
+        for k in range(12):
+            setattr(res, f'attr{k}', k)
+
+    run(lambda env: simpy.Resource(env, 1), big_dict_plain)
+
+    # succeed() shadowed on one request instance.
+    env = simpy.Environment()
+    res = simpy.Resource(env, 1)
+    first = res.request()
+    second = res.request()
+
+    def succeed(value=None):
+        log.append(('inst succeed', value))
+        return simpy.Event.succeed(second, value)
+    second.succeed = succeed
+    res.release(first)
+    env.run()
+    log.append((first.triggered, second.triggered))
+
+    # succeed() overridden in an Event subclass used by a Store.
+    class LoudGet(simpy.resources.store.StoreGet):
+        def succeed(self, value=None):
+            log.append(('LoudGet.succeed', value))
+            return super().succeed(value)
+
+    class LoudStore(simpy.Store):
+        get = simpy.core.BoundClass(LoudGet)
+
+    env = simpy.Environment()
+    st = LoudStore(env)
+    got = st.get()
+    st.put('item')
+    env.run()
+    log.append(got.value)
+    return log
+
+
+probe('cpdef overrides', cpdef_overrides)
 if np is not None:
     probe('priority numpy int64', lambda: priority_order(list(np.array([3, 1, 2], dtype=np.int64))))
     probe('priority numpy float', lambda: priority_order(list(np.array([1.5, 1.2], dtype=np.float64))))
