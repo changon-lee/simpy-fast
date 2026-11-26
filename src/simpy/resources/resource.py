@@ -157,8 +157,17 @@ class SortedQueue(list):
         if self.maxlen is not None and len(self) >= self.maxlen:
             raise RuntimeError('Cannot append event. Queue is full.')
 
-        super().append(item)
-        super().sort(key=lambda e: e.key)
+        # Binary insertion after all items with an equal key. This yields the
+        # same order as append() followed by a stable sort by key.
+        key = item.key
+        lo, hi = 0, len(self)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if key < self[mid].key:
+                hi = mid
+            else:
+                lo = mid + 1
+        self.insert(lo, item)
 
 
 class Resource(base.BaseResource):
