@@ -41,14 +41,15 @@ class Put(Event):
 
     def __init__(self, resource: ResourceType):
         # NOTE: Event.__init__() is inlined for performance reasons.
-        env: Environment = resource._env
+        res: BaseResource = resource
+        env: Environment = res._env
         self.env = env
-        self.callbacks = [resource._trigger_get]
-        self.resource = resource
+        self.callbacks = [res._trigger_get]
+        self.resource = res
         self.proc = env._active_proc
 
-        resource.put_queue.append(self)
-        resource._trigger_put(None)
+        res.put_queue.append(self)
+        res._trigger_put(None)
 
     @classmethod
     def __class_getitem__(cls, item: object) -> type:
@@ -101,14 +102,15 @@ class Get(Event):
 
     def __init__(self, resource: ResourceType):
         # NOTE: Event.__init__() is inlined for performance reasons.
-        env: Environment = resource._env
+        res: BaseResource = resource
+        env: Environment = res._env
         self.env = env
-        self.callbacks = [resource._trigger_put]
-        self.resource = resource
+        self.callbacks = [res._trigger_put]
+        self.resource = res
         self.proc = env._active_proc
 
-        resource.get_queue.append(self)
-        resource._trigger_get(None)
+        res.get_queue.append(self)
+        res._trigger_get(None)
 
     @classmethod
     def __class_getitem__(cls, item: object) -> type:
@@ -148,7 +150,7 @@ PutType = TypeVar('PutType', bound=Put)
 GetType = TypeVar('GetType', bound=Get)
 
 
-class BaseResource(Generic[PutType, GetType]):
+class BaseResource:
     """Abstract base class for a shared resource.
 
     You can :meth:`put()` something into the resources or :meth:`get()`
@@ -178,6 +180,12 @@ class BaseResource(Generic[PutType, GetType]):
     :class:`list` by default. The type must support index access (e.g.
     ``__getitem__()`` and ``__len__()``) as well as provide ``append()`` and
     ``pop()`` operations."""
+
+    @classmethod
+    def __class_getitem__(cls, item: object) -> type:
+        # Keeps annotations such as ``BaseResource[Put, Get]`` working. Not a
+        # typing.Generic so that Cython can compile it to an extension type.
+        return cls
 
     def __init__(self, env: Environment, capacity: Union[float, int]):
         self._env = env

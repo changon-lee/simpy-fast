@@ -100,13 +100,16 @@ class Store(base.BaseResource):
         put = BoundClass(StorePut)
         get = BoundClass(StoreGet)
 
-    def _do_put(self, event: StorePut) -> Optional[bool]:
+    def _do_put(self, event) -> Optional[bool]:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
+        ev: StorePut = event
         if len(self.items) < self._capacity:
-            self.items.append(event.item)
-            event.succeed()
+            self.items.append(ev.item)
+            ev.succeed()
         return None
 
-    def _do_get(self, event: StoreGet) -> Optional[bool]:
+    def _do_get(self, event) -> Optional[bool]:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
         if self.items:
             event.succeed(self.items.pop(0))
         return None
@@ -146,13 +149,15 @@ class PriorityStore(Store):
 
     """
 
-    def _do_put(self, event: StorePut) -> Optional[bool]:
+    def _do_put(self, event) -> Optional[bool]:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
         if len(self.items) < self._capacity:
             heappush(self.items, event.item)
             event.succeed()
         return None
 
-    def _do_get(self, event: StoreGet) -> Optional[bool]:
+    def _do_get(self, event) -> Optional[bool]:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
         if self.items:
             event.succeed(heappop(self.items))
         return None
@@ -192,9 +197,9 @@ class FilterStore(Store):
     else:
         get = BoundClass(FilterStoreGet)
 
-    def _do_get(  # type: ignore[override] # noqa: F821
-        self, event: FilterStoreGet
-    ) -> Optional[bool]:
+    def _do_get(self, event) -> Optional[bool]:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
+        # The event is a FilterStoreGet.
         for item in self.items:
             if event.filter(item):
                 self.items.remove(item)

@@ -28,12 +28,15 @@ processes can define a request priority, and a :class:`PreemptiveResource`
 whose resource users can be preempted by requests with a higher priority.
 
 """
+from operator import attrgetter
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, List, Optional, Type
 
 from simpy.core import BoundClass, Environment, SimTime
 from simpy.events import Process
 from simpy.resources import base
+
+_by_key = attrgetter('key')
 
 
 class Preempted:
@@ -220,18 +223,22 @@ class Resource(base.BaseResource):
         request = BoundClass(Request)
         release = BoundClass(Release)
 
-    def _do_put(self, event: Request) -> None:
+    def _do_put(self, event) -> None:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
+        ev: Request = event
         if len(self.users) < self._capacity:
-            self.users.append(event)
-            event.usage_since = self._env._now
-            event.succeed()
+            self.users.append(ev)
+            ev.usage_since = self._env._now
+            ev.succeed()
 
-    def _do_get(self, event: Release) -> None:
+    def _do_get(self, event) -> None:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
+        ev: Release = event
         try:
-            self.users.remove(event.request)  # type: ignore
+            self.users.remove(ev.request)
         except ValueError:
             pass
-        event.succeed()
+        ev.succeed()
 
 
 class PriorityResource(Resource):
@@ -282,14 +289,12 @@ class PreemptiveResource(PriorityResource):
 
     """
 
-    users: List[PriorityRequest]  # type: ignore
-
-    def _do_put(  # type: ignore[override] # noqa: F821
-        self, event: PriorityRequest
-    ) -> None:
+    def _do_put(self, event) -> None:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
+        # The event is a PriorityRequest.
         if len(self.users) >= self._capacity and event.preempt:
             # Check if we can preempt another process
-            preempt = sorted(self.users, key=lambda e: e.key)[-1]
+            preempt = sorted(self.users, key=_by_key)[-1]
             if preempt.key > event.key:
                 self.users.remove(preempt)
                 preempt.proc.interrupt(  # type: ignore
@@ -300,4 +305,5 @@ class PreemptiveResource(PriorityResource):
                     )
                 )
 
-        return super()._do_put(event)
+        # Explicit base call: zero-argument super() is unavailable in cpdef.
+        return PriorityResource._do_put(self, event)

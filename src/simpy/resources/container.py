@@ -107,18 +107,22 @@ class Container(base.BaseResource):
         put = BoundClass(ContainerPut)
         get = BoundClass(ContainerGet)
 
-    def _do_put(self, event: ContainerPut) -> Optional[bool]:
-        if self._capacity - self._level >= event.amount:
-            self._level += event.amount
-            event.succeed()
+    def _do_put(self, event) -> Optional[bool]:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
+        ev: ContainerPut = event
+        if self._capacity - self._level >= ev.amount:
+            self._level += ev.amount
+            ev.succeed()
             return True
         else:
             return None
 
-    def _do_get(self, event: ContainerGet) -> Optional[bool]:
-        if self._level >= event.amount:
-            self._level -= event.amount
-            event.succeed()
+    def _do_get(self, event) -> Optional[bool]:  # type: ignore
+        # Untyped parameter: it must match the cpdef declaration in the .pxd.
+        ev: ContainerGet = event
+        if self._level >= ev.amount:
+            self._level -= ev.amount
+            ev.succeed()
             return True
         else:
             return None
