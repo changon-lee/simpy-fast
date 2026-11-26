@@ -114,8 +114,13 @@ cdef class Container(base.BaseResource):
 
     cpdef _do_put(self, event):  # type: ignore
         cdef ContainerPut ev
-        # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev = event  # Typed in the .pxd.
+        if not isinstance(event, ContainerPut):
+            if self._capacity - self._level >= event.amount:
+                self._level += event.amount
+                event.succeed()
+                return True
+            return None
+        ev = <ContainerPut>event
         if self._capacity - self._level >= ev.amount:
             self._level += ev.amount
             ev.succeed()
@@ -125,8 +130,13 @@ cdef class Container(base.BaseResource):
 
     cpdef _do_get(self, event):  # type: ignore
         cdef ContainerGet ev
-        # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev = event  # Typed in the .pxd.
+        if not isinstance(event, ContainerGet):
+            if self._level >= event.amount:
+                self._level -= event.amount
+                event.succeed()
+                return True
+            return None
+        ev = <ContainerGet>event
         if self._level >= ev.amount:
             self._level -= ev.amount
             ev.succeed()

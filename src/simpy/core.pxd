@@ -22,3 +22,8 @@ cdef class Environment:
                        int nargs) except -1
     @cython.final
     cdef int _step(self) except -1
+    @cython.final
+    cdef bint _quiet(self) except -1
+
+cdef object env_now(object env)
+cdef object env_active_process(object env)

@@ -46,6 +46,113 @@ static inline int simpy_plain(PyObject *obj, PyTypeObject *base,
     return 1;
 }
 
+/* 1 when `obj.<name>` is the data descriptor `descr` (a property or C field
+ * of the extension type `base`): obj is an instance of base or of a subclass
+ * that overrides neither <name> nor attribute access. A data descriptor takes
+ * precedence over the instance dict, which therefore does not matter. */
+static inline int simpy_plain_type(PyObject *obj, PyTypeObject *base,
+                                   PyObject *name, PyObject *descr)
+{
+    PyTypeObject *tp = Py_TYPE(obj);
+
+    if (tp == base)
+        return 1;
+    if (!PyType_IsSubtype(tp, base) || tp->tp_getattro != base->tp_getattro)
+        return 0;
+    return _PyType_Lookup(tp, name) == descr;
+}
+
+/* The class that follows `cls` in the MRO of type(obj) (borrowed), or NULL.
+ * super(cls, obj).<name> finds the first class after `cls` that defines
+ * <name>; when that next class is a compiled (immutable) type which defines
+ * it, the result is known without asking super(). */
+static inline PyObject *simpy_mro_next(PyObject *obj, PyTypeObject *cls)
+{
+    PyObject *mro = Py_TYPE(obj)->tp_mro;
+    Py_ssize_t i, n;
+
+    if (mro == NULL || !PyTuple_Check(mro))
+        return NULL;
+    n = PyTuple_GET_SIZE(mro);
+    for (i = 0; i + 1 < n; i++) {
+        if (PyTuple_GET_ITEM(mro, i) == (PyObject *)cls)
+            return PyTuple_GET_ITEM(mro, i + 1);
+    }
+    return NULL;
+}
+
+/* A number that compares exactly like a double and without running Python
+ * code: an exact float other than NaN, or an exact int with |v| <= 2**53.
+ * 1 and *out set when `o` is one, else 0. */
+/* The value of the exact int `o`: 1 and *out set when it fits a long long,
+ * else 0. */
+static inline int simpy_long_value(PyObject *o, long long *out)
+{
+    int overflow;
+    long long v;
+
+#if PY_VERSION_HEX >= 0x030C0000
+    if (PyUnstable_Long_IsCompact((PyLongObject *)o)) {
+        *out = (long long)PyUnstable_Long_CompactValue((PyLongObject *)o);
+        return 1;
+    }
+#endif
+    v = PyLong_AsLongLongAndOverflow(o, &overflow);
+    if (overflow)
+        return 0;
+    *out = v;
+    return 1;
+}
+
+static inline int simpy_time_key(PyObject *o, double *out)
+{
+    long long v;
+
+    if (PyFloat_CheckExact(o)) {
+        double d = PyFloat_AS_DOUBLE(o);
+        if (d != d)
+            return 0;  /* NaN: tuple comparison treats it by identity */
+        *out = d;
+        return 1;
+    }
+    if (PyLong_CheckExact(o) && simpy_long_value(o, &v) &&
+            v <= 9007199254740992LL && v >= -9007199254740992LL) {
+        *out = (double)v;  /* exact: |v| <= 2**53 */
+        return 1;
+    }
+    return 0;
+}
+
+/* A PriorityRequest key that compares like three doubles: an exact 3-tuple
+ * of such numbers or bools. Comparing two of them with `<` runs no Python
+ * code and gives what comparing the doubles lexicographically gives. */
+static inline int simpy_key3(PyObject *key, double *out)
+{
+    Py_ssize_t i;
+
+    if (!PyTuple_CheckExact(key) || PyTuple_GET_SIZE(key) != 3)
+        return 0;
+    for (i = 0; i < 3; i++) {
+        PyObject *v = PyTuple_GET_ITEM(key, i);
+        if (v == Py_True)
+            out[i] = 1.0;
+        else if (v == Py_False)
+            out[i] = 0.0;
+        else if (!simpy_time_key(v, out + i))
+            return 0;
+    }
+    return 1;
+}
+
+static inline int simpy_key3_lt(const double *a, const double *b)
+{
+    if (a[0] != b[0])
+        return a[0] < b[0];
+    if (a[1] != b[1])
+        return a[1] < b[1];
+    return a[2] < b[2];
+}
+
 /* `now + 0` as upstream computes it when scheduling without delay, as a new
  * reference. For an exact int or float (other than -0.0) the sum equals
  * `now` in value and type, so `now` itself is returned. */

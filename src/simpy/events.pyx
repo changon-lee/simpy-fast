@@ -23,9 +23,10 @@ from cpython.method cimport (
 from cpython.object cimport PyObject, PyTypeObject
 from cpython.version cimport PY_VERSION_HEX
 
-import copyreg
+import copyreg as _copyreg
 
-from types import FrameType, GeneratorType
+from types import FrameType
+from types import GeneratorType as _GeneratorType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -47,6 +48,8 @@ if TYPE_CHECKING and TYPE_CHECKING != 'SPHINX':  # Avoid circular import
 
 cdef extern from "_cfast.h":
     bint simpy_plain(object obj, PyTypeObject *base, object name, object func)
+    bint simpy_plain_type(object obj, PyTypeObject *base, object name,
+                          object descr)
     object simpy_send(object gen, object arg, object send_name, int *returned)
 
 cdef extern from "Python.h":
@@ -97,11 +100,13 @@ cdef inline int _call_fast(object cb, Event event) except -1:
     return 0
 
 
-cdef int run_callbacks(Event event, list callbacks) except -1:
+cdef int run_callbacks(Event event, object callbacks) except -1:
     # for callback in callbacks: callback(event)
     cdef Py_ssize_t i = 0
-    if callbacks is None:
-        iter(callbacks)  # The TypeError upstream's for loop raises.
+    if type(callbacks) is not list:
+        for callback in callbacks:
+            callback(event)
+        return 0
     while i < PyList_GET_SIZE(callbacks):
         cb = <object>PyList_GET_ITEM(callbacks, i)
         i += 1
@@ -110,18 +115,61 @@ cdef int run_callbacks(Event event, list callbacks) except -1:
     return 0
 
 
-cdef inline int _env_schedule(Environment env, object event, object priority,
+cdef inline int _env_schedule(object env, object event, object priority,
                               object delay, int nargs) except -1:
     # ``env.schedule(event[, priority[, delay]])`` with *nargs* arguments.
-    if env is None:
-        getattr(env, 'schedule')  # The AttributeError upstream raises.
-    return env._schedule(event, priority, delay, nargs)
+    if simpy_type_check(env, <PyTypeObject *>Environment):
+        return (<Environment>env)._schedule(event, priority, delay, nargs)
+    if nargs == 1:
+        env.schedule(event)
+    elif nargs == 2:
+        env.schedule(event, priority)
+    else:
+        env.schedule(event, priority, delay)
+    return 0
+
+
+cdef bint event_triggered(object event) except -1:
+    # event.triggered
+    if simpy_plain_type(event, <PyTypeObject *>Event, _S_TRIGGERED,
+                        _TRIGGERED):
+        return (<Event>event)._value is not PENDING
+    return bool(event.triggered)
+
+
+cdef int raise_no_ok(Event event) except -1:
+    # Reading _ok of an event that was never triggered: upstream has no such
+    # attribute yet.
+    raise _no_attribute(event, '_ok')
+
+
+cdef int _set_active_proc(object env, object proc) except -1:
+    # env._active_proc = proc
+    if simpy_type_check(env, <PyTypeObject *>Environment):
+        (<Environment>env)._active_proc = proc
+    else:
+        env._active_proc = proc
+    return 0
+
+
+cdef bint _quiet_env(object env) except -1:
+    # True when env.schedule(process) runs no Python code.
+    return (simpy_type_check(env, <PyTypeObject *>Environment)
+            and (<Environment>env)._quiet())
+
+
+cdef int _raise_stop_iteration(object value) except -1:
+    # What gen.send() raises when the generator returns *value*.
+    if value is None:
+        raise StopIteration
+    raise StopIteration(value)
 
 
 PENDING: object = object()
 """Unique object to identify pending values of events."""
 
 EventPriority = NewType('EventPriority', int)
+EventPriority.__module__ = __name__
 
 URGENT: EventPriority = EventPriority(0)
 """Priority of interrupts and process initialization events."""
@@ -223,7 +271,7 @@ cdef class Event:
     def __reduce_ex__(self, protocol):
         if protocol >= 2 or type(self).__reduce__ is not object.__reduce__:
             return object.__reduce_ex__(self, protocol)
-        return copyreg.__newobj__, (type(self),), self.__getstate__()
+        return _copyreg.__newobj__, (type(self),), self.__getstate__()
 
     def __repr__(self) -> str:
         """Return the description of the event (see :meth:`_desc`) with the id
@@ -466,8 +514,7 @@ class Interruption(Event):
             raise RuntimeError('A process is not allowed to interrupt itself.')
 
         self.process = process
-        cdef Environment env = self.env
-        _env_schedule(env, self, URGENT, _ZERO, 2)
+        _env_schedule(self.env, self, URGENT, _ZERO, 2)
 
     def _interrupt(self, event: Event) -> None:
         # Ignore dead processes. Multiple concurrently scheduled interrupts
@@ -504,7 +551,7 @@ cdef class Process(Event):
     """
 
     def __init__(self, env: 'Environment', generator: ProcessGenerator):
-        if type(generator) is not GeneratorType and not hasattr(
+        if type(generator) is not _GeneratorType and not hasattr(
                 generator, 'throw'):
             # Implementation note: Python implementations differ in the
             # generator types they provide. Cython adds its own generator type
@@ -562,7 +609,7 @@ cdef class Process(Event):
         """
         Interruption(self, cause)
 
-    def _resume(self, Event event) -> None:
+    def _resume(self, event: Event) -> None:
         """Resumes the execution of the process with the value of *event*. If
         the process generator exits, the process itself will get triggered with
         the return value or the exception of the generator."""
@@ -578,18 +625,33 @@ cdef class Process(Event):
             return cb
         return getattr(self, '_resume')
 
-    cdef int _do_resume(self, Event event) except -1:  # noqa: C901
+    cdef int _do_resume(self, object event) except -1:  # noqa: C901
         cdef int returned = 0
-        env = self.env
         # Mark the current process as active.
-        env._active_proc = self
+        _set_active_proc(self.env, self)
 
         while True:
             # Get next event from process
             try:
-                if event._ok:
-                    next_event = simpy_send(self._generator, event._value,
-                                            _S_SEND, &returned)
+                if isinstance(event, Event):
+                    ok = (<Event>event)._ok
+                    if ok is None:
+                        raise_no_ok(<Event>event)
+                else:
+                    ok = event._ok
+                if ok:
+                    if isinstance(event, Event):
+                        value = (<Event>event)._value
+                    else:
+                        value = event._value
+                    next_event = simpy_send(self._generator, value, _S_SEND,
+                                            &returned)
+                    if returned and not _quiet_env(self.env):
+                        # Upstream schedules the terminated process while
+                        # handling the StopIteration, where Python code that
+                        # scheduling runs can see it.
+                        returned = 0
+                        _raise_stop_iteration(next_event)
                 else:
                     # The process has no choice but to handle the failed event
                     # (or fail itself).
@@ -606,18 +668,19 @@ cdef class Process(Event):
                 self._ok = True
                 self._value = e.args[0] if len(e.args) else None
                 self._resume_cb = None
-                _env_schedule(env, self, NORMAL, _ZERO, 1)
+                _env_schedule(self.env, self, NORMAL, _ZERO, 1)
                 next_event = None
                 break
             except BaseException as e:
                 # Process has failed.
                 self._ok = False
+                tb = e.__traceback__
                 # Strip the frame of this function from the traceback as it
                 # does not add any useful information.
-                e.__traceback__ = e.__traceback__.tb_next  # type: ignore
+                e.__traceback__ = tb.tb_next if tb else None
                 self._value = e
                 self._resume_cb = None
-                _env_schedule(env, self, NORMAL, _ZERO, 1)
+                _env_schedule(self.env, self, NORMAL, _ZERO, 1)
                 next_event = None
                 break
 
@@ -626,41 +689,46 @@ cdef class Process(Event):
                 self._ok = True
                 self._value = next_event
                 self._resume_cb = None
-                _env_schedule(env, self, NORMAL, _ZERO, 1)
+                _env_schedule(self.env, self, NORMAL, _ZERO, 1)
                 next_event = None
                 break
 
             # Process returned another event to wait upon.
             if isinstance(next_event, Event):
-                event = next_event
-                callbacks = event.callbacks
+                callbacks = (<Event>next_event).callbacks
+                if callbacks is not None:
+                    # The event has not yet been triggered. Register callback
+                    # to resume the process if that happens.
+                    callbacks.append(self._resume_bound())
+                    break
             else:
                 try:
                     # Be optimistic and blindly access the callbacks attribute.
-                    callbacks = next_event.callbacks
+                    if next_event.callbacks is not None:
+                        # The event has not yet been triggered. Register
+                        # callback to resume the process if that happens.
+                        next_event.callbacks.append(self._resume_bound())
+                        break
                 except AttributeError:
                     # Our optimism didn't work out, figure out what went wrong
                     # and inform the user.
+                    if hasattr(next_event, 'callbacks'):
+                        raise
+
                     msg = f'Invalid yield value "{next_event}"'
                     descr = _describe_frame(self._generator.gi_frame)
-                    error = RuntimeError(f'\n{descr}{msg}')
-                    # Drop the AttributeError as the cause for this exception.
-                    error.__cause__ = None
-                    raise error
-            if callbacks is not None:
-                # The event has not yet been triggered. Register callback
-                # to resume the process if that happens.
-                callbacks.append(self._resume_bound())
-                break
+                    raise RuntimeError(f'\n{descr}{msg}') from None
             # The event has already been processed: resume with its value.
             event = next_event
 
         self._target = next_event
-        env._active_proc = None
+        _set_active_proc(self.env, None)
         return 0
 
 
 cdef object _RESUME = Process.__dict__['_resume']
+cdef object _TRIGGERED = Event.__dict__['triggered']
+cdef object _S_TRIGGERED = 'triggered'
 cdef object _S_RESUME = '_resume'
 cdef object _S_SEND = 'send'
 

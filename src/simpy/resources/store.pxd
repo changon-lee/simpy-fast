@@ -16,7 +16,7 @@ cdef class FilterStoreGet(StoreGet):
 
 
 cdef class Store(base.BaseResource):
-    cdef public list items
+    cdef public object items
     cpdef _do_put(self, event)
     cpdef _do_get(self, event)
 

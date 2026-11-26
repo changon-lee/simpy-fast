@@ -19,7 +19,7 @@ cdef class PriorityRequest(Request):
 
 
 cdef class Resource(base.BaseResource):
-    cdef public list users
+    cdef public object users
     cdef public object queue
     cpdef _do_put(self, event)
     cpdef _do_get(self, event)

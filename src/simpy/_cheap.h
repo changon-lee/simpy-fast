@@ -14,6 +14,7 @@
 #define SIMPY_CHEAP_H
 
 #include <Python.h>
+#include "_cfast.h"
 
 typedef struct {
     double t;
@@ -109,38 +110,10 @@ static inline PyObject *simpy_heap_top_time(PyObject *self)
     return SIMPY_HEAP(self)->a[0].time;
 }
 
-/* Key of a time object: 1 and *out set when it qualifies, else 0. */
-static inline int simpy_time_key(PyObject *o, double *out)
-{
-    if (PyFloat_CheckExact(o)) {
-        double d = PyFloat_AS_DOUBLE(o);
-        if (d != d)
-            return 0;  /* NaN: tuple comparison treats it by identity */
-        *out = d;
-        return 1;
-    }
-    if (PyLong_CheckExact(o)) {
-        int overflow;
-        long long v = PyLong_AsLongLongAndOverflow(o, &overflow);
-        if (overflow || v > 9007199254740992LL || v < -9007199254740992LL)
-            return 0;  /* not exactly representable as a double */
-        *out = (double)v;
-        return 1;
-    }
-    return 0;
-}
 
 static inline int simpy_prio_key(PyObject *o, long long *out)
 {
-    if (PyLong_CheckExact(o)) {
-        int overflow;
-        long long v = PyLong_AsLongLongAndOverflow(o, &overflow);
-        if (overflow)
-            return 0;
-        *out = v;
-        return 1;
-    }
-    return 0;
+    return PyLong_CheckExact(o) && simpy_long_value(o, out);
 }
 
 /* (t, prio, eid) < (t, prio, eid), the tuple comparison for these keys. */

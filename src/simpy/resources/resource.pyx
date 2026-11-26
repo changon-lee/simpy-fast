@@ -28,18 +28,30 @@ processes can define a request priority, and a :class:`PreemptiveResource`
 whose resource users can be preempted by requests with a higher priority.
 
 """
-from operator import attrgetter
+from operator import attrgetter as _attrgetter
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, List, Optional, Type
 
 cimport cython
+from cpython.list cimport PyList_GET_ITEM, PyList_GET_SIZE, PyList_Insert
+from cpython.object cimport PyObject, PyTypeObject
 
+from simpy.core cimport env_now
 from simpy.events cimport register_state_fields
+from simpy.resources.base cimport BaseResource
+
+cdef extern from "_cfast.h":
+    bint simpy_plain_type(object obj, PyTypeObject *base, object name,
+                          object descr)
+    PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
+    bint simpy_key3(PyObject *key, double *out)
+    PyTypeObject *simpy_type "Py_TYPE" (PyObject *o)
+    bint simpy_key3_lt(const double *a, const double *b)
 from simpy.core import BoundClass, Environment, SimTime
 from simpy.events import Process
 from simpy.resources import base
 
-_by_key = attrgetter('key')
+_by_key = _attrgetter('key')
 
 
 class Preempted:
@@ -132,7 +144,7 @@ cdef class PriorityRequest(Request):
         """Indicates whether the request should preempt a resource user or not
         (:class:`PriorityResource` ignores this flag)."""
 
-        self.time = resource._env._now
+        self.time = env_now(resource._env)
         """The time at which the request was made."""
 
         self.key = (self.priority, self.time, not self.preempt)
@@ -164,17 +176,59 @@ class SortedQueue(list):
         if self.maxlen is not None and len(self) >= self.maxlen:
             raise RuntimeError('Cannot append event. Queue is full.')
 
-        # Binary insertion after all items with an equal key. This yields the
-        # same order as append() followed by a stable sort by key.
-        key = item.key
-        lo, hi = 0, len(self)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if key < self[mid].key:
-                hi = mid
-            else:
-                lo = mid + 1
-        self.insert(lo, item)
+        if _sorted_insert(self, item):
+            return
+        super().append(item)
+        super().sort(key=_by_key)
+
+
+cdef int _sorted_insert(object queue, object item) except -1:
+    # SortedQueue.append() without the sort, when that is exact: returns 1
+    # once *item* is inserted, 0 to leave it to append() and sort().
+    #
+    # The queue and the new item must be exact PriorityRequests (reading
+    # their key runs no code) with keys made of plain numbers (comparing them
+    # runs no code and is a total order), and the queue must be sorted. Then
+    # the stable sort of the queue plus the item, which upstream computes, is
+    # the queue with the item inserted after all equal keys.
+    cdef double new[3]
+    cdef double cur[3]
+    cdef double prev[3]
+    cdef Py_ssize_t i, lo, hi, mid, n
+    cdef PyObject *ev
+    cdef PyTypeObject *tp = <PyTypeObject *>PriorityRequest
+    if simpy_mro_next(queue, <PyTypeObject *>_SortedQueue) is not \
+            <PyObject *>list:
+        return 0  # super() would not find list's append() and sort().
+    n = PyList_GET_SIZE(queue)  # queue is a SortedQueue, hence a list.
+    if type(item) is not PriorityRequest or not simpy_key3(
+            <PyObject *>(<PriorityRequest>item).key, new):
+        return 0
+    for i in range(n):
+        ev = PyList_GET_ITEM(queue, i)
+        if simpy_type(ev) != tp or not simpy_key3(
+                <PyObject *>(<PriorityRequest>ev).key, cur):
+            return 0
+        if i and simpy_key3_lt(cur, prev):
+            return 0  # Not sorted: let sort() put it in order.
+        prev[0], prev[1], prev[2] = cur[0], cur[1], cur[2]
+    lo, hi = 0, n
+    while lo < hi:
+        mid = (lo + hi) // 2
+        simpy_key3(
+            <PyObject *>(<PriorityRequest>PyList_GET_ITEM(queue, mid)).key,
+            cur)
+        if simpy_key3_lt(new, cur):
+            hi = mid
+        else:
+            lo = mid + 1
+    PyList_Insert(queue, lo, item)
+    return 1
+
+
+# The class whose append() calls _sorted_insert(): super() in its methods
+# refers to it even when the module attribute is rebound.
+cdef object _SortedQueue = SortedQueue
 
 
 cdef class Resource(base.BaseResource):
@@ -223,23 +277,28 @@ cdef class Resource(base.BaseResource):
         release = BoundClass(Release)
 
     cpdef _do_put(self, event):  # type: ignore
-        cdef Request ev
-        # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev = event  # Typed in the .pxd.
-        if len(self.users) < self._capacity:
-            self.users.append(ev)
-            ev.usage_since = self._env._now
-            ev.succeed()
+        if len(self.users) < _capacity(self):
+            self.users.append(event)
+            if isinstance(event, Request):
+                (<Request>event).usage_since = env_now(self._env)
+                (<Request>event).succeed()
+            else:
+                event.usage_since = env_now(self._env)
+                event.succeed()
 
     cpdef _do_get(self, event):  # type: ignore
-        cdef Release ev
-        # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev = event  # Typed in the .pxd.
+        if isinstance(event, Release):
+            try:
+                self.users.remove((<Release>event).request)
+            except ValueError:
+                pass
+            (<Release>event).succeed()
+            return None
         try:
-            self.users.remove(ev.request)
+            self.users.remove(event.request)
         except ValueError:
             pass
-        ev.succeed()
+        event.succeed()
 
 
 cdef class PriorityResource(Resource):
@@ -293,7 +352,7 @@ cdef class PreemptiveResource(PriorityResource):
     cpdef _do_put(self, event):  # type: ignore
         # Untyped parameter: it must match the cpdef declaration in the .pxd.
         # The event is a PriorityRequest.
-        if len(self.users) >= self._capacity and event.preempt:
+        if len(self.users) >= _capacity(self) and event.preempt:
             # Check if we can preempt another process
             preempt = sorted(self.users, key=_by_key)[-1]
             if preempt.key > event.key:
@@ -306,8 +365,23 @@ cdef class PreemptiveResource(PriorityResource):
                     )
                 )
 
-        # Explicit base call: zero-argument super() is unavailable in cpdef.
-        return PriorityResource._do_put(self, event)
+        if type(self) is PreemptiveResource:
+            # What super() finds for this exact type.
+            return Resource._do_put(self, event)
+        # Zero-argument super() is unavailable in cpdef methods.
+        return super(PreemptiveResource, self)._do_put(event)
+
+
+cdef object _CAPACITY = BaseResource.__dict__['capacity']
+cdef object _S_CAPACITY = 'capacity'
+
+
+cdef inline object _capacity(BaseResource res):
+    # res.capacity
+    if simpy_plain_type(res, <PyTypeObject *>BaseResource, _S_CAPACITY,
+                        _CAPACITY):
+        return res._capacity
+    return res.capacity
 
 
 register_state_fields(Request, ('usage_since',))

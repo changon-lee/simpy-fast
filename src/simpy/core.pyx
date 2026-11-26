@@ -4,11 +4,13 @@ Core components for event-discrete simulation environments.
 """
 cimport cython
 from cpython.object cimport PyObject, PyTypeObject
+from cpython.float cimport PyFloat_CheckExact
+from cpython.long cimport PyLong_CheckExact
 from cpython.ref cimport Py_DECREF
 
-from simpy.events cimport run_callbacks
+from simpy.events cimport raise_no_ok, run_callbacks
 
-import copyreg
+import copyreg as _copyreg
 from heapq import heappush, heappop
 from itertools import count
 from types import MethodType
@@ -37,6 +39,10 @@ from simpy.events import (
     NORMAL,
 )
 
+# Cython binds cimported types at C level only; upstream also has them as
+# module attributes.
+globals()['Event'] = Event
+
 
 cdef extern from "_cheap.h":
     ctypedef struct SimpyQEntry:
@@ -56,6 +62,8 @@ cdef extern from "_cheap.h":
 
 cdef extern from "_cfast.h":
     bint simpy_plain(object obj, PyTypeObject *base, object name, object func)
+    bint simpy_plain_type(object obj, PyTypeObject *base, object name,
+                          object descr)
     object simpy_add_zero(object now, object zero)
 
 simpy_heap_ready()
@@ -63,6 +71,7 @@ simpy_heap_ready()
 Infinity: float = float('inf')  #: Convenience alias for infinity
 
 T = TypeVar('T')
+T.__module__ = __name__
 
 
 class BoundClass(Generic[T]):
@@ -168,7 +177,7 @@ cdef class Environment:
     def __reduce_ex__(self, protocol):
         if protocol >= 2 or type(self).__reduce__ is not object.__reduce__:
             return object.__reduce_ex__(self, protocol)
-        return copyreg.__newobj__, (type(self),), self.__getstate__()
+        return _copyreg.__newobj__, (type(self),), self.__getstate__()
 
     @property
     def now(self) -> SimTime:
@@ -323,7 +332,6 @@ cdef class Environment:
         # Pop and process the next event. Return 1 if there is none.
         cdef SimpyQEntry entry
         cdef Event ev
-        cdef list callbacks
         if self._compat or self._heap is None:
             try:
                 self._now, _, _, event = heappop(self._queue)
@@ -345,7 +353,10 @@ cdef class Environment:
             callbacks = ev.callbacks
             ev.callbacks = None
             run_callbacks(ev, callbacks)
-            if ev._ok or hasattr(ev, '_defused'):
+            ok = ev._ok
+            if ok is None:
+                raise_no_ok(ev)
+            if ok or hasattr(ev, '_defused'):
                 return 0
             # The event has failed and has not been defused. Crash the
             # environment.
@@ -366,6 +377,16 @@ cdef class Environment:
             exc.__cause__ = event._value
             raise exc
         return 0
+
+    cdef bint _quiet(self) except -1:
+        # True when self.schedule(event) for a NORMAL event runs no Python
+        # code: schedule() is the plain method and the C heap, whose keys are
+        # plain numbers, takes the entry.
+        now = self._now
+        return (not self._compat and self._heap is not None
+                and (PyLong_CheckExact(now) or PyFloat_CheckExact(now))
+                and simpy_plain(self, <PyTypeObject *>Environment,
+                                _S_SCHEDULE, _SCHEDULE))
 
     def run(
         self, until: Optional[Union[SimTime, Event]] = None
@@ -438,6 +459,25 @@ cdef object _SCHEDULE = Environment.__dict__['schedule']
 cdef object _S_SCHEDULE = 'schedule'
 cdef object _STEP = Environment.__dict__['step']
 cdef object _S_STEP = 'step'
+cdef object _NOW = Environment.__dict__['now']
+cdef object _S_NOW = 'now'
+cdef object _ACTIVE_PROCESS = Environment.__dict__['active_process']
+cdef object _S_ACTIVE_PROCESS = 'active_process'
+
+
+cdef object env_now(object env):
+    # env.now
+    if simpy_plain_type(env, <PyTypeObject *>Environment, _S_NOW, _NOW):
+        return (<Environment>env)._now
+    return env.now
+
+
+cdef object env_active_process(object env):
+    # env.active_process
+    if simpy_plain_type(env, <PyTypeObject *>Environment, _S_ACTIVE_PROCESS,
+                        _ACTIVE_PROCESS):
+        return (<Environment>env)._active_proc
+    return env.active_process
 cdef object _ZERO = 0
 
 

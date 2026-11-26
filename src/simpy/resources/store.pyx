@@ -107,12 +107,13 @@ cdef class Store(base.BaseResource):
         get = BoundClass(StoreGet)
 
     cpdef _do_put(self, event):  # type: ignore
-        cdef StorePut ev
-        # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev = event  # Typed in the .pxd.
         if len(self.items) < self._capacity:
-            self.items.append(ev.item)
-            ev.succeed()
+            if isinstance(event, StorePut):
+                self.items.append((<StorePut>event).item)
+                (<StorePut>event).succeed()
+            else:
+                self.items.append(event.item)
+                event.succeed()
         return None
 
     cpdef _do_get(self, event):  # type: ignore

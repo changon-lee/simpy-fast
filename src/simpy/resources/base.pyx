@@ -10,6 +10,7 @@ from types import TracebackType
 from typing import (
     TYPE_CHECKING,
     ClassVar,
+    ContextManager,
     Generic,
     MutableSequence,
     Optional,
@@ -19,12 +20,28 @@ from typing import (
 )
 
 cimport cython
+from cpython.object cimport PyObject, PyTypeObject
 
-from simpy.events cimport register_state_fields
+from simpy.core cimport env_active_process
+from simpy.events cimport event_triggered, register_state_fields
 from simpy.core import BoundClass, Environment
-from simpy.events import PENDING, Event, Process
+from simpy.events import Event, Process
+
+cdef extern from "_cfast.h":
+    PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
+
+try:
+    from types import GenericAlias as _GenericAlias
+except ImportError:  # Python < 3.9
+    def _GenericAlias(cls, item):
+        return cls
+
+# Cython binds cimported types at C level only; upstream also has them as
+# module attributes.
+globals().update(Environment=Environment, Event=Event)
 
 ResourceType = TypeVar('ResourceType', bound='BaseResource')
+ResourceType.__module__ = __name__
 
 
 @cython.auto_pickle(False)
@@ -44,23 +61,34 @@ cdef class Put(Event):
     """
 
     def __init__(self, resource: ResourceType):
-        # NOTE: Event.__init__() is inlined for performance reasons.
+        cdef BaseResource res
+        cdef bint typed = isinstance(resource, BaseResource)
+        if simpy_mro_next(self, <PyTypeObject *>Put) is <PyObject *>Event:
+            # super().__init__(resource._env) runs Event.__init__(): inlined.
+            if typed:
+                self.env = (<BaseResource>resource)._env
+            else:
+                self.env = resource._env
+            self.callbacks = []
+        else:
+            super(Put, self).__init__(resource._env)
         self.resource = resource
-        res = self.resource  # Same object; a typed local when compiled.
-        env = res._env
-        self.env = env
-        self.callbacks = [res._trigger_get]
-        self.proc = env._active_proc
-
-        res.put_queue.append(self)
-        res._trigger_put(None)
+        self.proc = env_active_process(self.env)
+        if typed:
+            res = <BaseResource>resource
+            res.put_queue.append(self)
+            self.callbacks.append(res._trigger_get)
+            res._trigger_put(None)
+        else:
+            resource.put_queue.append(self)
+            self.callbacks.append(resource._trigger_get)
+            resource._trigger_put(None)
 
     @classmethod
-    def __class_getitem__(cls, item: object) -> type:
-        # Keeps annotations such as ``Put[Resource]`` working. The class is
-        # not a typing.Generic so that Cython can compile it to an extension
-        # type; it is still a context manager through __enter__/__exit__.
-        return cls
+    def __class_getitem__(cls, item: object) -> object:
+        # ``Put[Resource]``: the class is not a typing.Generic, so that
+        # Cython can compile it to an extension type.
+        return _GenericAlias(cls, item)
 
     def __enter__(self) -> 'Put':
         return self
@@ -85,7 +113,7 @@ cdef class Put(Event):
         method is called automatically.
 
         """
-        if self._value is PENDING:
+        if not event_triggered(self):
             self.resource.put_queue.remove(self)
 
 
@@ -106,23 +134,34 @@ cdef class Get(Event):
     """
 
     def __init__(self, resource: ResourceType):
-        # NOTE: Event.__init__() is inlined for performance reasons.
+        cdef BaseResource res
+        cdef bint typed = isinstance(resource, BaseResource)
+        if simpy_mro_next(self, <PyTypeObject *>Get) is <PyObject *>Event:
+            # super().__init__(resource._env) runs Event.__init__(): inlined.
+            if typed:
+                self.env = (<BaseResource>resource)._env
+            else:
+                self.env = resource._env
+            self.callbacks = []
+        else:
+            super(Get, self).__init__(resource._env)
         self.resource = resource
-        res = self.resource  # Same object; a typed local when compiled.
-        env = res._env
-        self.env = env
-        self.callbacks = [res._trigger_put]
-        self.proc = env._active_proc
-
-        res.get_queue.append(self)
-        res._trigger_get(None)
+        self.proc = env_active_process(self.env)
+        if typed:
+            res = <BaseResource>resource
+            res.get_queue.append(self)
+            self.callbacks.append(res._trigger_put)
+            res._trigger_get(None)
+        else:
+            resource.get_queue.append(self)
+            self.callbacks.append(resource._trigger_put)
+            resource._trigger_get(None)
 
     @classmethod
-    def __class_getitem__(cls, item: object) -> type:
-        # Keeps annotations such as ``Get[Resource]`` working. The class is
-        # not a typing.Generic so that Cython can compile it to an extension
-        # type; it is still a context manager through __enter__/__exit__.
-        return cls
+    def __class_getitem__(cls, item: object) -> object:
+        # ``Get[Resource]``: the class is not a typing.Generic, so that
+        # Cython can compile it to an extension type.
+        return _GenericAlias(cls, item)
 
     def __enter__(self) -> 'Get':
         return self
@@ -147,12 +186,14 @@ cdef class Get(Event):
         method is called automatically.
 
         """
-        if self._value is PENDING:
+        if not event_triggered(self):
             self.resource.get_queue.remove(self)
 
 
 PutType = TypeVar('PutType', bound=Put)
+PutType.__module__ = __name__
 GetType = TypeVar('GetType', bound=Get)
+GetType.__module__ = __name__
 
 
 cdef class BaseResource:
@@ -187,10 +228,10 @@ cdef class BaseResource:
     ``pop()`` operations."""
 
     @classmethod
-    def __class_getitem__(cls, item: object) -> type:
-        # Keeps annotations such as ``BaseResource[Put, Get]`` working. Not a
-        # typing.Generic so that Cython can compile it to an extension type.
-        return cls
+    def __class_getitem__(cls, item: object) -> object:
+        # ``BaseResource[Put, Get]``: the class is not a typing.Generic, so
+        # that Cython can compile it to an extension type.
+        return _GenericAlias(cls, item)
 
     def __init__(self, env: Environment, capacity: Union[float, int]):
         self._env = env
@@ -240,7 +281,6 @@ cdef class BaseResource:
         raise NotImplementedError(self)
 
     cpdef _trigger_put(self, get_event):
-        cdef Event put_event
         """This method is called once a new put event has been created or a get
         event has been processed.
 
@@ -248,20 +288,19 @@ cdef class BaseResource:
         calls :meth:`_do_put` to check if the conditions for the event are met.
         If :meth:`_do_put` returns ``False``, the iteration is stopped early.
         """
+        cdef Py_ssize_t idx
 
         # Maintain queue invariant: All put requests must be untriggered.
         # This code is not very pythonic because the queue interface should be
         # simple (only append(), pop(), __getitem__() and __len__() are
         # required).
-        put_queue = self.put_queue
-        do_put = self._do_put
         idx = 0
-        while idx < len(put_queue):
-            put_event = put_queue[idx]
-            proceed = do_put(put_event)
-            if put_event._value is PENDING:
+        while idx < len(self.put_queue):
+            put_event = self.put_queue[idx]
+            proceed = self._do_put(put_event)
+            if not event_triggered(put_event):
                 idx += 1
-            elif put_queue.pop(idx) is not put_event:
+            elif self.put_queue.pop(idx) != put_event:
                 raise RuntimeError('Put queue invariant violated')
 
             if not proceed:
@@ -281,7 +320,6 @@ cdef class BaseResource:
         raise NotImplementedError(self)
 
     cpdef _trigger_get(self, put_event):
-        cdef Event get_event
         """Trigger get events.
 
         This method is called once a new get event has been created or a put
@@ -291,20 +329,19 @@ cdef class BaseResource:
         calls :meth:`_do_get` to check if the conditions for the event are met.
         If :meth:`_do_get` returns ``False``, the iteration is stopped early.
         """
+        cdef Py_ssize_t idx
 
         # Maintain queue invariant: All get requests must be untriggered.
         # This code is not very pythonic because the queue interface should be
         # simple (only append(), pop(), __getitem__() and __len__() are
         # required).
-        get_queue = self.get_queue
-        do_get = self._do_get
         idx = 0
-        while idx < len(get_queue):
-            get_event = get_queue[idx]
-            proceed = do_get(get_event)
-            if get_event._value is PENDING:
+        while idx < len(self.get_queue):
+            get_event = self.get_queue[idx]
+            proceed = self._do_get(get_event)
+            if not event_triggered(get_event):
                 idx += 1
-            elif get_queue.pop(idx) is not get_event:
+            elif self.get_queue.pop(idx) != get_event:
                 raise RuntimeError('Get queue invariant violated')
 
             if not proceed:

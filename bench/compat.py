@@ -556,6 +556,550 @@ def private_ok():
     return out
 
 
+class MockEnv:
+    """Duck-typed environment: records what SimPy asks of it."""
+
+    def __init__(self):
+        self.calls = []
+        self.now = 7
+        self.active_process = 'proc?'
+        self._active_proc = None
+
+    def schedule(self, event, *args):
+        self.calls.append((type(event).__name__, args))
+
+
+def mock_env():
+    env = MockEnv()
+    ev = simpy.Event(env)
+    ev.succeed('v')
+    simpy.Timeout(env, 3, 'w')
+    ev2 = simpy.Event(env)
+    ev2.fail(ValueError('x'))
+    ev3 = simpy.Event(env)
+    ev3.trigger(ev)
+
+    def g():
+        yield None
+
+    p = simpy.Process(env, g())
+    first = (list(env.calls), type(p._target).__name__)
+    try:
+        p._resume(p._target)
+    except RuntimeError as e:
+        return first, str(e).splitlines()[-1]
+    return first, env.calls[-1]
+
+
+def callbacks_subclass():
+    class Calls(list):
+        def __iter__(self):
+            log.append('iter')
+            return super().__iter__()
+
+    log = []
+    env = simpy.Environment()
+    ev = env.timeout(1, 'x')
+    ev.callbacks = Calls(ev.callbacks)
+    ev.callbacks.append(lambda e: log.append(('cb', e.value)))
+
+    def p():
+        got = yield ev
+        log.append(('proc', got))
+
+    env.process(p())
+    env.run()
+    return log
+
+
+class FakeResource:
+    def __init__(self, env):
+        self._env = env
+        self.put_queue = []
+        self.get_queue = []
+        self.log = []
+
+    def _trigger_get(self, event):
+        self.log.append(('tg', type(event).__name__))
+
+    def _trigger_put(self, event):
+        self.log.append(('tp', event))
+        for e in list(self.put_queue):
+            e.succeed('done')
+            self.put_queue.remove(e)
+
+
+def duck_resource():
+    env = simpy.Environment()
+    res = FakeResource(env)
+    put = simpy.resources.base.Put(res)
+    env.run()
+    return res.log, put.value, put.proc, put.resource is res
+
+
+def custom_put_for_store():
+    from simpy.resources import base
+
+    class MyPut(base.Put):
+        def __init__(self, store, item):
+            self.item = item
+            super().__init__(store)
+
+    env = simpy.Environment()
+    st = simpy.Store(env, capacity=1)
+    out = []
+
+    def producer():
+        for i in range(3):
+            yield MyPut(st, i)
+            out.append(('put', i, env.now))
+
+    def consumer():
+        for _ in range(3):
+            yield env.timeout(1)
+            out.append(('get', (yield st.get()), env.now))
+
+    env.process(producer())
+    env.process(consumer())
+    env.run()
+    return out
+
+
+def custom_events_for_container():
+    from simpy.resources import base
+
+    class Fill(base.Put):
+        def __init__(self, c, amount):
+            self.amount = amount
+            super().__init__(c)
+
+    class Drain(base.Get):
+        def __init__(self, c, amount):
+            self.amount = amount
+            super().__init__(c)
+
+    env = simpy.Environment()
+    c = simpy.Container(env, 10, init=2)
+    f, d = Fill(c, 5), Drain(c, 4)
+    env.run()
+    return c.level, f.triggered, d.triggered
+
+
+def dynamic_capacity():
+    class Elastic(simpy.Resource):
+        @property
+        def capacity(self):
+            return 1 if self._env.now < 5 else 3
+
+    env = simpy.Environment()
+    res = Elastic(env, 1)
+    out = []
+
+    def user(i):
+        with res.request() as req:
+            yield req
+            out.append((i, env.now, req.usage_since))
+            yield env.timeout(4)
+
+    for i in range(5):
+        env.process(user(i))
+
+    def poke():
+        yield env.timeout(5)
+        res._trigger_put(None)
+
+    env.process(poke())
+    env.run()
+    return out
+
+
+def env_properties():
+    class Env(simpy.Environment):
+        @property
+        def now(self):
+            return ('now', self._now)
+
+        @property
+        def active_process(self):
+            return ('ap', self._active_proc is not None)
+
+    env = Env()
+    res = simpy.Resource(env, 1)
+    pres = simpy.PriorityResource(env, 1)
+    out = []
+
+    def p():
+        req = res.request()
+        yield req
+        preq = pres.request(priority=2)
+        yield preq
+        out.append((req.usage_since, req.proc, preq.time, preq.key))
+
+    env.process(p())
+    env.run()
+    return out
+
+
+def triggered_override():
+    seen = []
+
+    class LoudPut(simpy.resources.store.StorePut):
+        @property
+        def triggered(self):
+            seen.append(self.item)
+            return self._value is not simpy.events.PENDING
+
+    env = simpy.Environment()
+    st = simpy.Store(env, capacity=1)
+    for i in range(3):
+        LoudPut(st, i)
+    st.get()
+    env.run()
+    return seen, st.items
+
+
+def requeue_priority():
+    env = simpy.Environment()
+    res = simpy.PriorityResource(env, 1)
+    order = []
+    reqs = {}
+
+    def user(name, prio):
+        req = res.request(priority=prio)
+        reqs[name] = req
+        with req:
+            yield req
+            order.append(name)
+            yield env.timeout(1)
+
+    def bump():
+        yield env.timeout(0.5)
+        # Re-prioritize a waiting request, then let another one queue up.
+        reqs['c'].key = (-1,) + reqs['c'].key[1:]
+        env.process(user('e', 5))
+
+    for name, prio in (('a', 0), ('b', 1), ('c', 3), ('d', 2)):
+        env.process(user(name, prio))
+    env.process(bump())
+    env.run()
+    return order
+
+
+def nan_priority():
+    env = simpy.Environment()
+    res = simpy.PriorityResource(env, 1)
+    order = []
+
+    def user(i, prio):
+        with res.request(priority=prio) as req:
+            yield req
+            order.append(i)
+            yield env.timeout(1)
+
+    nan = float('nan')
+    for i, prio in enumerate([1, nan, 0, 2, nan, -1, 3, 0.5, nan, 1]):
+        env.process(user(i, prio))
+    env.run()
+    return order
+
+
+def preemptive_mixin():
+    seen = []
+
+    class Audit(simpy.PriorityResource):
+        def _do_put(self, event):
+            seen.append(('audit', event.priority))
+            return super()._do_put(event)
+
+    class Res(simpy.PreemptiveResource, Audit):
+        pass
+
+    env = simpy.Environment()
+    res = Res(env, 1)
+
+    def user(prio, t):
+        yield env.timeout(t)
+        with res.request(priority=prio) as req:
+            try:
+                yield req
+                yield env.timeout(3)
+            except simpy.Interrupt:
+                seen.append(('preempted', prio, env.now))
+
+    env.process(user(2, 0))
+    env.process(user(1, 1))
+    env.run()
+    return seen
+
+
+def do_put_repatched():
+    env = simpy.Environment()
+    st = simpy.Store(env, capacity=10)
+    seen = []
+    orig = st._do_put
+
+    def first(event):
+        seen.append(('first', event.item))
+        st._do_put = second
+        orig(event)
+        return True
+
+    def second(event):
+        seen.append(('second', event.item))
+        orig(event)
+        return True
+
+    for i in range(3):
+        st.put(i)
+    st.items.clear()
+    for ev in list(st.put_queue):
+        st.put_queue.remove(ev)
+    queued = []
+    for i in range(3):
+        e = simpy.resources.store.StorePut.__new__(
+            simpy.resources.store.StorePut)
+        simpy.Event.__init__(e, env)
+        e.resource = st
+        e.item = i
+        queued.append(e)
+    st.put_queue.extend(queued)
+    st._do_put = first
+    st._trigger_put(None)
+    return seen, st.items
+
+
+def duck_event_resume():
+    class Signal:
+        def __init__(self, env, value):
+            self.env = env
+            self.callbacks = []
+            self._ok = True
+            self._value = value
+
+        def fire(self):
+            self.env.schedule(self)
+
+    env = simpy.Environment()
+    out = []
+    sig = Signal(env, 'payload')
+
+    def p():
+        got = yield sig
+        out.append((env.now, got))
+        got = yield sig  # Already processed: resumes at once.
+        out.append((env.now, got))
+
+    def firer():
+        yield env.timeout(2)
+        sig.fire()
+
+    env.process(p())
+    env.process(firer())
+    env.run()
+    return out
+
+
+def schedule_raises_on_exit():
+    class Env(simpy.Environment):
+        def schedule(self, event, *args):
+            if isinstance(event, simpy.Process) and \
+                    event._value is not simpy.events.PENDING:
+                raise KeyError('no')
+            super().schedule(event, *args)
+
+    env = Env()
+
+    def g():
+        yield env.timeout(1)
+        return 'r'
+
+    env.process(g())
+    try:
+        env.run()
+    except KeyError as e:
+        return exc_chain(e)
+
+
+def generic_alias():
+    import typing
+    from simpy.resources import base
+    a = base.Put[simpy.Resource]
+    out = [repr(a), typing.get_origin(a) is base.Put, typing.get_args(a),
+           repr(base.BaseResource[base.Put, base.Get])]
+    try:
+        isinstance(None, a)
+    except TypeError as e:
+        out.append(type(e).__name__)
+    return out
+
+
+def users_items_subclass():
+    class L(list):
+        pass
+
+    env = simpy.Environment()
+    res = simpy.Resource(env, 1)
+    res.users = L()
+    st = simpy.Store(env)
+    st.items = L()
+    out = []
+
+    def p():
+        with res.request() as req:
+            yield req
+            out.append(type(res.users).__name__)
+        yield st.put(1)
+        out.append((type(st.items).__name__, (yield st.get())))
+
+    env.process(p())
+    env.run()
+    return out
+
+
+def events_tuple_subclass():
+    class T(tuple):
+        pass
+
+    env = simpy.Environment()
+    c = env.timeout(1) & env.timeout(2)
+    try:
+        c._events = T(c._events)
+        out = [type(c._events).__name__]
+    except TypeError as e:
+        out = [type(e).__name__]
+    env.run()
+    return out + [c.ok]
+
+
+probe('mock env', mock_env)
+probe('callbacks subclass', callbacks_subclass)
+probe('duck resource', duck_resource)
+probe('custom put for store', custom_put_for_store)
+probe('custom events for container', custom_events_for_container)
+probe('dynamic capacity', dynamic_capacity)
+probe('env properties', env_properties)
+probe('triggered override', triggered_override)
+probe('requeue priority', requeue_priority)
+probe('nan priority', nan_priority)
+probe('preemptive mixin', preemptive_mixin)
+probe('do_put repatched', do_put_repatched)
+probe('duck event resume', duck_event_resume)
+probe('schedule raises on exit', schedule_raises_on_exit)
+probe('generic alias', generic_alias)
+probe('users/items subclass', users_items_subclass)
+probe('events tuple subclass', events_tuple_subclass)
+
+
+def sorted_queue_edges():
+    from simpy.resources.resource import SortedQueue
+    out = []
+
+    def run(prios, cls=None):
+        env = simpy.Environment()
+        res = simpy.PriorityResource(env, 1)
+        order = []
+
+        def user(i, prio):
+            req = (cls(res, prio) if cls else res.request(priority=prio))
+            with req:
+                yield req
+                order.append(i)
+                yield env.timeout(1)
+
+        for i, prio in enumerate(prios):
+            env.process(user(i, prio))
+        env.run()
+        return order
+
+    big = 2 ** 60
+    out.append(run([big + 1, big, big + 1, 3, big - 1, 2 ** 53 + 1, 2 ** 53]))
+    out.append(run([1, 1.0, True, 0, False, -0.0, 0.0, 2.5, 1, -1]))
+    out.append(run([3, 1, 2, float('inf'), -float('inf'), 1e300, -5]))
+    out.append(run([(1, 2), (1, 1), (0, 5), (1, 1)]))
+    out.append(run(['b', 'a', 'c', 'a']))
+
+    class MyReq(simpy.resources.resource.PriorityRequest):
+        pass
+
+    out.append(run([2, 1, 3, 1, 0], MyReq))
+
+    # Foreign items in the queue, then a regular request.
+    class Item:
+        def __init__(self, key):
+            self.key = key
+
+    q = SortedQueue()
+    env = simpy.Environment()
+    res = simpy.PriorityResource(env, 1)
+    reqs = [res.request(priority=p) for p in (5, 1, 3)]
+    for it in (Item((2, 0, False)), reqs[1], Item((4, 0, True)), reqs[2]):
+        q.append(it)
+    q.append(reqs[0])
+    out.append([getattr(e, 'key', None) for e in q])
+
+    # Unsorted queue (mutated by hand) gets fully re-sorted.
+    q2 = SortedQueue()
+    for r in reqs:
+        q2.append(r)
+    list.reverse(q2)
+    q2.append(res.request(priority=2))
+    out.append([e.key[0] for e in q2])
+
+    # maxlen
+    q3 = SortedQueue(maxlen=2)
+    q3.append(reqs[0])
+    q3.append(reqs[1])
+    try:
+        q3.append(reqs[2])
+    except RuntimeError as e:
+        out.append(str(e))
+    out.append([e.key[0] for e in q3])
+
+    # A mixin between SortedQueue and list that changes sort().
+    log = []
+
+    class Rev(list):
+        def sort(self, *, key=None, reverse=False):
+            log.append(len(self))
+            super().sort(key=key, reverse=True)
+
+    class Q(SortedQueue, Rev):
+        pass
+
+    q4 = Q()
+    for r in reqs:
+        q4.append(r)
+    out.append(([e.key[0] for e in q4], log))
+    return out
+
+
+probe('sorted queue edges', sorted_queue_edges)
+
+
+def module_namespaces():
+    import importlib
+    import pickle
+    out = []
+    for m in ('simpy.core', 'simpy.events', 'simpy.resources.base',
+              'simpy.resources.container', 'simpy.resources.resource',
+              'simpy.resources.store'):
+        mod = importlib.import_module(m)
+        out.append((m, sorted(k for k in vars(mod) if not k.startswith('_'))))
+    import simpy.core as c
+    import simpy.events as e
+    import simpy.resources.base as b
+    for o in (c.T, e.EventPriority, b.ResourceType, b.PutType, b.GetType):
+        try:
+            same = pickle.loads(pickle.dumps(o)) is o
+        except Exception as ex:
+            same = type(ex).__name__
+        out.append((repr(o), o.__module__, same))
+    return out
+
+
+probe('module namespaces', module_namespaces)
+
+
 probe('private ok', private_ok)
 probe('pending ok', pending_ok)
 probe('subclass skip init', subclass_skip_init)

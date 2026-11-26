@@ -7,19 +7,19 @@ cdef class BaseResource
 
 
 cdef class Put(Event):
-    cdef public BaseResource resource
+    cdef public object resource
     cdef public object proc
 
 
 cdef class Get(Event):
-    cdef public BaseResource resource
+    cdef public object resource
     cdef public object proc
 
 
 cdef class BaseResource:
     cdef dict __dict__
     cdef object __weakref__
-    cdef public Environment _env
+    cdef public object _env
     cdef public object _capacity
     cdef public object put_queue
     cdef public object get_queue
