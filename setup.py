@@ -22,7 +22,10 @@ exts = [
               include_dirs=[os.path.join('src', 'simpy')])
     for m in MODULES
 ]
-ext_modules = cythonize(exts, quiet=True, compiler_directives=DIRECTIVES)
+# force: patch_generated_c() patches freshly generated C only, never C
+# left over from an earlier build.
+ext_modules = cythonize(exts, quiet=True, force=True,
+                        compiler_directives=DIRECTIVES)
 patch_generated_c(ext_modules, os.path.join('src', 'simpy'))
 
 
@@ -50,7 +53,7 @@ class BuildExt(build_ext):
 
 setup(
     name='simpy',
-    version='4.0.2+fast1',
+    version='4.0.2+fast2',
     description='SimPy 4.0.2 with Cython-compiled core and resources',
     license='MIT',
     package_dir={'': 'src'},

@@ -34,7 +34,10 @@ exts = [
               include_dirs=[pkg_out])
     for m in MODULES
 ]
-ext_modules = cythonize(exts, quiet=True, compiler_directives=DIRECTIVES)
+# force: patch_generated_c() patches freshly generated C only, never C
+# left over from an earlier build.
+ext_modules = cythonize(exts, quiet=True, force=True,
+                        compiler_directives=DIRECTIVES)
 patch_generated_c(ext_modules, pkg_out)
 
 
