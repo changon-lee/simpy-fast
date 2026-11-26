@@ -205,6 +205,23 @@ class Environment:
             exc.__cause__ = event._value
             raise exc
 
+    def _run_inline(self) -> None:
+        """Same as calling :meth:`step()` forever, without the per-event
+        method call."""
+        queue = self._queue
+        while queue:
+            self._now, _, _, event = heappop(queue)
+
+            callbacks, event.callbacks = event.callbacks, None  # type: ignore
+            for callback in callbacks:
+                callback(event)
+
+            if not event._ok and not hasattr(event, '_defused'):
+                exc = type(event._value)(*event._value.args)
+                exc.__cause__ = event._value
+                raise exc
+        raise EmptySchedule()
+
     def run(
         self, until: Optional[Union[SimTime, Event]] = None
     ) -> Optional[Any]:
@@ -250,8 +267,12 @@ class Environment:
             until.callbacks.append(StopSimulation.callback)
 
         try:
-            while True:
-                self.step()
+            if type(self).step is Environment.step and 'step' not in vars(self):
+                self._run_inline()
+            else:
+                # step() is overridden or patched (e.g. for tracing): honor it.
+                while True:
+                    self.step()
         except StopSimulation as exc:
             return exc.args[0]  # == until.value
         except EmptySchedule:
