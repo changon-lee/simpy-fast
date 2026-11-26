@@ -1156,6 +1156,57 @@ probe('fail str', lambda: fail_with('x'))
 probe('fail KeyboardInterrupt', lambda: type(fail_with(KeyboardInterrupt())).__name__)
 probe('Event(None)', lambda: event_with_env(None))
 probe('release foreign request', release_foreign)
+
+
+def queue_pop_allocation():
+    import sys
+    out = []
+    for make in (lambda q: [q[0]], lambda q: list(q), lambda q: q):
+        env = simpy.Environment()
+        c = simpy.Container(env, capacity=10, init=0)
+        g = c.get(5)
+        c.get_queue = make(c.get_queue)
+        c.put(5)
+        env.run()
+        out.append((len(c.get_queue), sys.getsizeof(c.get_queue), g.triggered))
+    return out
+
+
+def queue_event_ne():
+    log = []
+
+    class NeGet(simpy.resources.container.ContainerGet):
+        def __ne__(self, other):
+            log.append('ne')
+            return False
+
+    class EqGet(simpy.resources.container.ContainerGet):
+        def __eq__(self, other):
+            log.append('eq')
+            return NotImplemented
+
+    class BadNe(simpy.resources.container.ContainerGet):
+        def __ne__(self, other):
+            log.append('bad')
+            return self
+
+        def __bool__(self):
+            raise ValueError('no truth')
+
+    out = []
+    for cls in (NeGet, EqGet, BadNe):
+        env = simpy.Environment()
+        c = simpy.Container(env, capacity=10, init=5)
+        try:
+            ev = cls(c, 2)
+            out.append((cls.__name__, ev.triggered, len(c.get_queue)))
+        except Exception as e:  # noqa: BLE001
+            out.append((cls.__name__, type(e).__name__, str(e)))
+    return out, log
+
+
+probe('queue pop allocation', queue_pop_allocation)
+probe('queue event ne', queue_event_ne)
 if np is not None:
     probe('priority numpy int64', lambda: priority_order(list(np.array([3, 1, 2], dtype=np.int64))))
     probe('priority numpy float', lambda: priority_order(list(np.array([1.5, 1.2], dtype=np.float64))))

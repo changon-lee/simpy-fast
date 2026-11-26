@@ -133,7 +133,7 @@ cdef bint event_triggered(object event) except -1:
     # event.triggered
     if simpy_plain_type(event, <PyTypeObject *>Event, _S_TRIGGERED,
                         _TRIGGERED):
-        return (<Event>event)._value is not PENDING
+        return (<Event>event)._value is not _PENDING
     return bool(event.triggered)
 
 
@@ -166,14 +166,18 @@ cdef int _raise_stop_iteration(object value) except -1:
 
 
 PENDING: object = object()
+# Compiled code reads the module constants from C variables.
+cdef object _PENDING = PENDING
 """Unique object to identify pending values of events."""
 
 EventPriority = NewType('EventPriority', int)
 EventPriority.__module__ = __name__
 
 URGENT: EventPriority = EventPriority(0)
+cdef object _URGENT = URGENT
 """Priority of interrupts and process initialization events."""
 NORMAL: EventPriority = EventPriority(1)
+cdef object _NORMAL = NORMAL
 """Default priority used by events."""
 
 
@@ -215,7 +219,7 @@ cdef class Event:
     def __cinit__(self) -> None:
         # Upstream's class attribute default, also for subclasses that skip
         # __init__.
-        self._value = PENDING
+        self._value = _PENDING
 
     def __init__(self, env: 'Environment'):
         self.env = env
@@ -254,7 +258,7 @@ cdef class Event:
                 state[name] = object.__getattribute__(self, name)
             except AttributeError:
                 pass  # Not assigned yet (_ok).
-        if self._value is PENDING:
+        if self._value is _PENDING:
             del state['_value']
         state.update(vars(self))
         return state
@@ -286,7 +290,7 @@ cdef class Event:
     def triggered(self) -> bool:
         """Becomes ``True`` if the event has been triggered and its callbacks
         are about to be invoked."""
-        return self._value is not PENDING
+        return self._value is not _PENDING
 
     @property
     def processed(self) -> bool:
@@ -340,7 +344,7 @@ cdef class Event:
         Raises :exc:`AttributeError` if the value is not yet available.
 
         """
-        if self._value is PENDING:
+        if self._value is _PENDING:
             raise AttributeError(f'Value of {self} is not yet available')
         return self._value
 
@@ -354,7 +358,7 @@ cdef class Event:
         """
         self._ok = event._ok
         self._value = event._value
-        _env_schedule(self.env, self, NORMAL, _ZERO, 1)
+        _env_schedule(self.env, self, _NORMAL, _ZERO, 1)
 
     cpdef succeed(self, value=None):
         """Set the event's value, mark it as successful and schedule it for
@@ -363,12 +367,12 @@ cdef class Event:
         Raises :exc:`RuntimeError` if this event has already been triggerd.
 
         """
-        if self._value is not PENDING:
+        if self._value is not _PENDING:
             raise RuntimeError(f'{self} has already been triggered')
 
         self._ok = True
         self._value = value
-        _env_schedule(self.env, self, NORMAL, _ZERO, 1)
+        _env_schedule(self.env, self, _NORMAL, _ZERO, 1)
         return self
 
     def fail(self, exception: Exception) -> 'Event':
@@ -380,13 +384,13 @@ cdef class Event:
         Raises :exc:`RuntimeError` if this event has already been triggered.
 
         """
-        if self._value is not PENDING:
+        if self._value is not _PENDING:
             raise RuntimeError(f'{self} has already been triggered')
         if not isinstance(exception, BaseException):
             raise ValueError(f'{exception} is not an exception.')
         self._ok = False
         self._value = exception
-        _env_schedule(self.env, self, NORMAL, _ZERO, 1)
+        _env_schedule(self.env, self, _NORMAL, _ZERO, 1)
         return self
 
     def __and__(self, other: 'Event') -> 'Condition':
@@ -455,7 +459,7 @@ cdef class Timeout(Event):
         self._value = value
         self._delay = delay
         self._ok = True
-        _env_schedule(self.env, self, NORMAL, delay, 3)
+        _env_schedule(self.env, self, _NORMAL, delay, 3)
 
     def _desc(self) -> str:
         """Return a string *Timeout(delay[, value=value])*."""
@@ -485,7 +489,7 @@ cdef class Initialize(Event):
         # will be handled before interrupts. Otherwise, a process whose
         # generator has not yet been started could be interrupted.
         self._ok = True
-        _env_schedule(self.env, self, URGENT, _ZERO, 2)
+        _env_schedule(self.env, self, _URGENT, _ZERO, 2)
 
 
 class Interruption(Event):
@@ -505,7 +509,7 @@ class Interruption(Event):
         self._ok = False
         self._defused = True
 
-        if process._value is not PENDING:
+        if process._value is not _PENDING:
             raise RuntimeError(
                 f'{process} has terminated and cannot be interrupted.'
             )
@@ -514,13 +518,13 @@ class Interruption(Event):
             raise RuntimeError('A process is not allowed to interrupt itself.')
 
         self.process = process
-        _env_schedule(self.env, self, URGENT, _ZERO, 2)
+        _env_schedule(self.env, self, _URGENT, _ZERO, 2)
 
     def _interrupt(self, event: Event) -> None:
         # Ignore dead processes. Multiple concurrently scheduled interrupts
         # cause this situation. If the process dies while handling the first
         # one, the remaining interrupts must be ignored.
-        if self.process._value is not PENDING:
+        if self.process._value is not _PENDING:
             return
 
         # A process never expects an interrupt and is always waiting for a
@@ -576,7 +580,7 @@ cdef class Process(Event):
         init.callbacks = [self._resume_bound()]
         init._value = None
         init._ok = True
-        _env_schedule(init.env, init, URGENT, _ZERO, 2)
+        _env_schedule(init.env, init, _URGENT, _ZERO, 2)
         self._target = init
 
     def _desc(self) -> str:
@@ -597,7 +601,7 @@ cdef class Process(Event):
     @property
     def is_alive(self) -> bool:
         """``True`` until the process generator exits."""
-        return self._value is PENDING
+        return self._value is _PENDING
 
     def interrupt(self, cause: Optional[Any] = None) -> None:
         """Interrupt this process optionally providing a *cause*.
@@ -668,7 +672,7 @@ cdef class Process(Event):
                 self._ok = True
                 self._value = e.args[0] if len(e.args) else None
                 self._resume_cb = None
-                _env_schedule(self.env, self, NORMAL, _ZERO, 1)
+                _env_schedule(self.env, self, _NORMAL, _ZERO, 1)
                 next_event = None
                 break
             except BaseException as e:
@@ -680,7 +684,7 @@ cdef class Process(Event):
                 e.__traceback__ = tb.tb_next if tb else None
                 self._value = e
                 self._resume_cb = None
-                _env_schedule(self.env, self, NORMAL, _ZERO, 1)
+                _env_schedule(self.env, self, _NORMAL, _ZERO, 1)
                 next_event = None
                 break
 
@@ -689,7 +693,7 @@ cdef class Process(Event):
                 self._ok = True
                 self._value = next_event
                 self._resume_cb = None
-                _env_schedule(self.env, self, NORMAL, _ZERO, 1)
+                _env_schedule(self.env, self, _NORMAL, _ZERO, 1)
                 next_event = None
                 break
 
@@ -889,7 +893,7 @@ cdef class Condition(Event):
     def _check(self, event: Event) -> None:
         """Check if the condition was already met and schedule the *event* if
         so."""
-        if self._value is not PENDING:
+        if self._value is not _PENDING:
             return
 
         self._count += 1

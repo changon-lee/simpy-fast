@@ -153,6 +153,47 @@ static inline int simpy_key3_lt(const double *a, const double *b)
     return a[2] < b[2];
 }
 
+/* list.pop(i) for an exact list, as a new reference. The list ends up as
+ * the method leaves it: same items, and the same allocation, since both
+ * shrink through list_resize() or clear the list when it becomes empty.
+ * Before 3.11, pop() empties a list through list_resize(), which keeps an
+ * allocation of one slot; the method handles that case and out of range
+ * indices. */
+static inline PyObject *simpy_list_pop(PyObject *list, Py_ssize_t i)
+{
+    Py_ssize_t n = PyList_GET_SIZE(list);
+    PyObject *item;
+
+    if (i < 0 || i >= n || (n == 1 && ((PyListObject *)list)->allocated == 1))
+        return PyObject_CallMethod(list, "pop", "n", i);
+    item = PyList_GET_ITEM(list, i);
+    Py_INCREF(item);
+    if (PyList_SetSlice(list, i, i + 1, NULL) < 0) {
+        Py_DECREF(item);
+        return NULL;
+    }
+    return item;
+}
+
+/* `a != b` as a truth value, -1 on error. When both types keep object's
+ * rich comparison, Python answers by identity. */
+static inline int simpy_ne(PyObject *a, PyObject *b)
+{
+    richcmpfunc base = PyBaseObject_Type.tp_richcompare;
+    PyObject *r;
+    int t;
+
+    if (Py_TYPE(a)->tp_richcompare == base &&
+            Py_TYPE(b)->tp_richcompare == base)
+        return a != b;
+    r = PyObject_RichCompare(a, b, Py_NE);
+    if (r == NULL)
+        return -1;
+    t = PyObject_IsTrue(r);
+    Py_DECREF(r);
+    return t;
+}
+
 /* `now + 0` as upstream computes it when scheduling without delay, as a new
  * reference. For an exact int or float (other than -0.0) the sum equals
  * `now` in value and type, so `now` itself is returned. */

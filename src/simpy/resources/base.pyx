@@ -29,6 +29,8 @@ from simpy.events import Event, Process
 
 cdef extern from "_cfast.h":
     PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
+    object simpy_list_pop(object list, Py_ssize_t i)
+    int simpy_ne(object a, object b) except -1
 
 try:
     from types import GenericAlias as _GenericAlias
@@ -300,7 +302,7 @@ cdef class BaseResource:
             proceed = self._do_put(put_event)
             if not event_triggered(put_event):
                 idx += 1
-            elif self.put_queue.pop(idx) != put_event:
+            elif simpy_ne(_pop(self.put_queue, idx), put_event):
                 raise RuntimeError('Put queue invariant violated')
 
             if not proceed:
@@ -341,11 +343,18 @@ cdef class BaseResource:
             proceed = self._do_get(get_event)
             if not event_triggered(get_event):
                 idx += 1
-            elif self.get_queue.pop(idx) != get_event:
+            elif simpy_ne(_pop(self.get_queue, idx), get_event):
                 raise RuntimeError('Get queue invariant violated')
 
             if not proceed:
                 break
+
+
+cdef inline object _pop(object queue, Py_ssize_t idx):
+    # queue.pop(idx)
+    if type(queue) is list:
+        return simpy_list_pop(queue, idx)
+    return queue.pop(idx)
 
 
 register_state_fields(Put, ('resource', 'proc'))
