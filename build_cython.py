@@ -25,7 +25,7 @@ shutil.copytree(os.path.join(ROOT, 'src', 'simpy'), pkg_out,
                 ignore=shutil.ignore_patterns('__pycache__'))
 
 exts = [
-    Extension(m, [os.path.join(OUT, *m.split('.')) + '.py'])
+    Extension(m, [os.path.join(OUT, *m.split('.')) + '.pyx'])
     for m in MODULES
 ]
 ext_modules = cythonize(exts, quiet=True, compiler_directives=DIRECTIVES)

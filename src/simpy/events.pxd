@@ -1,5 +1,4 @@
-# Cython declarations for events.py (pure-Python mode). Ignored when the
-# module runs uncompiled.
+# Cython declarations for events.pyx.
 from simpy.core cimport Environment
 
 cdef class Event:
