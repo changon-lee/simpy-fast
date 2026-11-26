@@ -76,9 +76,13 @@ class Event:
 
     """
 
-    _ok: bool
-    _defused: bool
-    _value: Any = PENDING
+    # Attributes: ``_value`` (PENDING until triggered), ``_ok`` (set when
+    # triggered) and ``_defused`` (only present once defused). When compiled
+    # with Cython, ``events.pxd`` declares them as fields of an extension type.
+
+    def __cinit__(self, *args: Any, **kwargs: Any) -> None:
+        # Only runs when compiled: default for subclasses that skip __init__.
+        self._value = PENDING
 
     def __init__(self, env: 'Environment'):
         self.env = env
@@ -116,7 +120,11 @@ class Event:
         :raises AttributeError: if accessed before the event is triggered.
 
         """
-        return self._ok
+        ok = self._ok
+        if ok is None:
+            # Compiled builds store an unset _ok as None.
+            raise AttributeError(f'{self} has not been triggered yet')
+        return ok
 
     @property
     def defused(self) -> bool:
@@ -211,6 +219,13 @@ class Event:
         happened concurrently)."""
         return Condition(self.env, Condition.any_events, [self, other])
 
+
+try:
+    # Pure-Python default for subclasses that skip Event.__init__(). A
+    # compiled Event is an extension type and sets it in __cinit__ instead.
+    Event._value = PENDING  # type: ignore
+except TypeError:
+    pass
 
 EventCallback = Callable[[Event], None]
 EventCallbacks = List[EventCallback]
@@ -394,7 +409,7 @@ class Process(Event):
             # Get next event from process
             try:
                 if event._ok:
-                    event = self._generator.send(event._value)
+                    next_event = self._generator.send(event._value)
                 else:
                     # The process has no choice but to handle the failed event
                     # (or fail itself).
@@ -405,33 +420,33 @@ class Process(Event):
                     # processes.
                     exc = type(event._value)(*event._value.args)
                     exc.__cause__ = event._value
-                    event = self._generator.throw(exc)
+                    next_event = self._generator.throw(exc)
             except StopIteration as e:
                 # Process has terminated.
-                event = None  # type: ignore
                 self._ok = True
                 self._value = e.args[0] if len(e.args) else None
                 heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
+                next_event = None
                 break
             except BaseException as e:
                 # Process has failed.
-                event = None  # type: ignore
                 self._ok = False
                 # Strip the frame of this function from the traceback as it
                 # does not add any useful information.
                 e.__traceback__ = e.__traceback__.tb_next  # type: ignore
                 self._value = e
                 heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
+                next_event = None
                 break
 
             # Process returned another event to wait upon.
             try:
                 # Be optimistic and blindly access the callbacks attribute.
-                callbacks = event.callbacks
+                callbacks = next_event.callbacks
             except AttributeError:
                 # Our optimism didn't work out, figure out what went wrong and
                 # inform the user.
-                msg = f'Invalid yield value "{event}"'
+                msg = f'Invalid yield value "{next_event}"'
                 descr = _describe_frame(self._generator.gi_frame)
                 error = RuntimeError(f'\n{descr}{msg}')
                 # Drop the AttributeError as the cause for this exception.
@@ -442,8 +457,10 @@ class Process(Event):
                 # to resume the process if that happens.
                 callbacks.append(self._resume)
                 break
+            # The event has already been processed: resume with its value.
+            event = next_event
 
-        self._target = event
+        self._target = next_event
         env._active_proc = None
 
 

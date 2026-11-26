@@ -6,3 +6,4 @@ build/
 *.pyd
 *.c
 .pytest_cache/
+build.log
