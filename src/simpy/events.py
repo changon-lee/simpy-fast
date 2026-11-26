@@ -13,6 +13,7 @@ used, there are several specialized subclasses of it.
     ~simpy.events.AllOf
 
 """
+from heapq import heappush
 from types import FrameType
 from typing import (
     TYPE_CHECKING,
@@ -161,7 +162,8 @@ class Event:
         """
         self._ok = event._ok
         self._value = event._value
-        self.env.schedule(self)
+        env = self.env
+        heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
 
     def succeed(self, value: Optional[Any] = None) -> 'Event':
         """Set the event's value, mark it as successful and schedule it for
@@ -175,7 +177,8 @@ class Event:
 
         self._ok = True
         self._value = value
-        self.env.schedule(self)
+        env = self.env
+        heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
         return self
 
     def fail(self, exception: Exception) -> 'Event':
@@ -193,7 +196,8 @@ class Event:
             raise ValueError(f'{exception} is not an exception.')
         self._ok = False
         self._value = exception
-        self.env.schedule(self)
+        env = self.env
+        heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
         return self
 
     def __and__(self, other: 'Event') -> 'Condition':
@@ -236,7 +240,7 @@ class Timeout(Event):
         self._value = value
         self._delay = delay
         self._ok = True
-        env.schedule(self, NORMAL, delay)
+        heappush(env._queue, (env._now + delay, NORMAL, next(env._eid), self))
 
     def _desc(self) -> str:
         """Return a string *Timeout(delay[, value=value])*."""
@@ -262,7 +266,7 @@ class Initialize(Event):
         # will be handled before interrupts. Otherwise, a process whose
         # generator has not yet been started could be interrupted.
         self._ok = True
-        env.schedule(self, URGENT)
+        heappush(env._queue, (env._now, URGENT, next(env._eid), self))
 
 
 class Interruption(Event):
@@ -291,7 +295,8 @@ class Interruption(Event):
             raise RuntimeError('A process is not allowed to interrupt itself.')
 
         self.process = process
-        self.env.schedule(self, URGENT)
+        env = self.env
+        heappush(env._queue, (env._now, URGENT, next(env._eid), self))
 
     def _interrupt(self, event: Event) -> None:
         # Ignore dead processes. Multiple concurrently scheduled interrupts
@@ -381,8 +386,9 @@ class Process(Event):
         """Resumes the execution of the process with the value of *event*. If
         the process generator exits, the process itself will get triggered with
         the return value or the exception of the generator."""
+        env = self.env
         # Mark the current process as active.
-        self.env._active_proc = self
+        env._active_proc = self
 
         while True:
             # Get next event from process
@@ -405,7 +411,7 @@ class Process(Event):
                 event = None  # type: ignore
                 self._ok = True
                 self._value = e.args[0] if len(e.args) else None
-                self.env.schedule(self)
+                heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
                 break
             except BaseException as e:
                 # Process has failed.
@@ -415,32 +421,30 @@ class Process(Event):
                 # does not add any useful information.
                 e.__traceback__ = e.__traceback__.tb_next  # type: ignore
                 self._value = e
-                self.env.schedule(self)
+                heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
                 break
 
             # Process returned another event to wait upon.
             try:
                 # Be optimistic and blindly access the callbacks attribute.
-                if event.callbacks is not None:
-                    # The event has not yet been triggered. Register callback
-                    # to resume the process if that happens.
-                    event.callbacks.append(self._resume)
-                    break
+                callbacks = event.callbacks
             except AttributeError:
                 # Our optimism didn't work out, figure out what went wrong and
                 # inform the user.
-                if hasattr(event, 'callbacks'):
-                    raise
-
                 msg = f'Invalid yield value "{event}"'
                 descr = _describe_frame(self._generator.gi_frame)
                 error = RuntimeError(f'\n{descr}{msg}')
                 # Drop the AttributeError as the cause for this exception.
                 error.__cause__ = None
                 raise error
+            if callbacks is not None:
+                # The event has not yet been triggered. Register callback
+                # to resume the process if that happens.
+                callbacks.append(self._resume)
+                break
 
         self._target = event
-        self.env._active_proc = None
+        env._active_proc = None
 
 
 class ConditionValue:
