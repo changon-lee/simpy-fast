@@ -41,6 +41,10 @@ ext_modules = cythonize(
     quiet=True,
     compiler_directives={
         'binding': True,
+        # Annotations in the .py files stay documentation only: typing them
+        # would make Cython coerce or reject arguments (an `int` priority
+        # would truncate 1.5 to 1). All typing lives in the .pxd files.
+        'annotation_typing': False,
         'embedsignature': True,
         # CY_PROFILE=1 builds a cProfile-visible variant for diagnosis only.
         'profile': os.environ.get('CY_PROFILE') == '1',

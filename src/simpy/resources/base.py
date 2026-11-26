@@ -41,11 +41,11 @@ class Put(Event):
 
     def __init__(self, resource: ResourceType):
         # NOTE: Event.__init__() is inlined for performance reasons.
-        res: BaseResource = resource
-        env: Environment = res._env
+        self.resource = resource
+        res = self.resource  # Same object; a typed local when compiled.
+        env = res._env
         self.env = env
         self.callbacks = [res._trigger_get]
-        self.resource = res
         self.proc = env._active_proc
 
         res.put_queue.append(self)
@@ -102,11 +102,11 @@ class Get(Event):
 
     def __init__(self, resource: ResourceType):
         # NOTE: Event.__init__() is inlined for performance reasons.
-        res: BaseResource = resource
-        env: Environment = res._env
+        self.resource = resource
+        res = self.resource  # Same object; a typed local when compiled.
+        env = res._env
         self.env = env
         self.callbacks = [res._trigger_put]
-        self.resource = res
         self.proc = env._active_proc
 
         res.get_queue.append(self)
@@ -249,7 +249,6 @@ class BaseResource:
         # required).
         put_queue = self.put_queue
         do_put = self._do_put
-        put_event: Event
         idx = 0
         while idx < len(put_queue):
             put_event = put_queue[idx]
@@ -292,7 +291,6 @@ class BaseResource:
         # required).
         get_queue = self.get_queue
         do_get = self._do_get
-        get_event: Event
         idx = 0
         while idx < len(get_queue):
             get_event = get_queue[idx]

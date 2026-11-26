@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Regression gate: upstream's test suite against src/. The one known failure
 # (test_exception_chaining) fails on pristine upstream too on this machine.
 # test_rt_slow_sim_default_behavior is wall-clock flaky on upstream too.
@@ -12,4 +12,13 @@ case "$summary" in
   "1 failed, 137 passed"*) ;;
   *) echo "$out" | grep -E "Error|error" | head -5; echo "GATE: RED (unexpected summary)"; exit 1 ;;
 esac
+# Behavior probes at API boundaries must match upstream exactly.
+here="$(cd .. && pwd)"
+base_out=$("${PY:-python}" "$here/bench/compat.py" "$here/upstream/src" 2>&1)
+tree_out=$("${PY:-python}" "$here/bench/compat.py" "$here/${TREE:-src}" 2>&1)
+if [ "$base_out" != "$tree_out" ]; then
+  diff <(echo "$base_out") <(echo "$tree_out") 2>/dev/null || { echo "$tree_out" | head -40; }
+  echo "GATE: RED (compat probes differ from upstream)"; exit 1
+fi
+echo "compat: identical to upstream"
 echo "GATE: GREEN"

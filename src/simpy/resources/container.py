@@ -109,7 +109,7 @@ class Container(base.BaseResource):
 
     def _do_put(self, event) -> Optional[bool]:  # type: ignore
         # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev: ContainerPut = event
+        ev = event  # Typed in the .pxd.
         if self._capacity - self._level >= ev.amount:
             self._level += ev.amount
             ev.succeed()
@@ -119,7 +119,7 @@ class Container(base.BaseResource):
 
     def _do_get(self, event) -> Optional[bool]:  # type: ignore
         # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev: ContainerGet = event
+        ev = event  # Typed in the .pxd.
         if self._level >= ev.amount:
             self._level -= ev.amount
             ev.succeed()

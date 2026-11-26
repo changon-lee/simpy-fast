@@ -209,7 +209,6 @@ class Environment:
         """Same as calling :meth:`step()` forever, without the per-event
         method call."""
         queue = self._queue
-        event: Event  # Typed for Cython: direct field access.
         while queue:
             self._now, _, _, event = heappop(queue)
 

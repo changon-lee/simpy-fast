@@ -225,7 +225,7 @@ class Resource(base.BaseResource):
 
     def _do_put(self, event) -> None:  # type: ignore
         # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev: Request = event
+        ev = event  # Typed in the .pxd.
         if len(self.users) < self._capacity:
             self.users.append(ev)
             ev.usage_since = self._env._now
@@ -233,7 +233,7 @@ class Resource(base.BaseResource):
 
     def _do_get(self, event) -> None:  # type: ignore
         # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev: Release = event
+        ev = event  # Typed in the .pxd.
         try:
             self.users.remove(ev.request)
         except ValueError:

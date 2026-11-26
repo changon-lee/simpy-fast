@@ -257,7 +257,8 @@ class Timeout(Event):
         self._value = value
         self._delay = delay
         self._ok = True
-        heappush(env._queue, (env._now + delay, NORMAL, next(env._eid), self))
+        env_ = self.env  # Same object; a typed local when compiled.
+        heappush(env_._queue, (env_._now + delay, NORMAL, next(env_._eid), self))
 
     def _desc(self) -> str:
         """Return a string *Timeout(delay[, value=value])*."""
@@ -283,7 +284,8 @@ class Initialize(Event):
         # will be handled before interrupts. Otherwise, a process whose
         # generator has not yet been started could be interrupted.
         self._ok = True
-        heappush(env._queue, (env._now, URGENT, next(env._eid), self))
+        env_ = self.env  # Same object; a typed local when compiled.
+        heappush(env_._queue, (env_._now, URGENT, next(env_._eid), self))
 
 
 class Interruption(Event):

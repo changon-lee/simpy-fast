@@ -1,4 +1,5 @@
 # Cython declarations for resource.py (pure-Python mode).
+cimport cython
 from simpy.resources cimport base
 
 
@@ -20,7 +21,9 @@ cdef class PriorityRequest(Request):
 cdef class Resource(base.BaseResource):
     cdef public list users
     cdef public object queue
+    @cython.locals(ev=Request)
     cpdef _do_put(self, event)
+    @cython.locals(ev=Release)
     cpdef _do_get(self, event)
 
 

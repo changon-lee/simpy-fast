@@ -9,6 +9,7 @@ cdef class Event:
     cdef public list callbacks
     cdef public object _value
     cdef public object _ok
+    cpdef succeed(self, value=*)
 
 cdef class Timeout(Event):
     cdef public object _delay
@@ -19,6 +20,7 @@ cdef class Initialize(Event):
 cdef class Process(Event):
     cdef public object _generator
     cdef public object _target
+    cpdef _resume(self, Event event)
 
 cdef class Condition(Event):
     cdef public object _evaluate

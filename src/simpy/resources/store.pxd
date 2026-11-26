@@ -1,4 +1,5 @@
 # Cython declarations for store.py (pure-Python mode).
+cimport cython
 from simpy.resources cimport base
 
 
@@ -16,6 +17,7 @@ cdef class FilterStoreGet(StoreGet):
 
 cdef class Store(base.BaseResource):
     cdef public list items
+    @cython.locals(ev=StorePut)
     cpdef _do_put(self, event)
     cpdef _do_get(self, event)
 

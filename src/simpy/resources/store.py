@@ -102,7 +102,7 @@ class Store(base.BaseResource):
 
     def _do_put(self, event) -> Optional[bool]:  # type: ignore
         # Untyped parameter: it must match the cpdef declaration in the .pxd.
-        ev: StorePut = event
+        ev = event  # Typed in the .pxd.
         if len(self.items) < self._capacity:
             self.items.append(ev.item)
             ev.succeed()
