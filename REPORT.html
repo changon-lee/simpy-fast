@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimPy 4.0.2 성능 개선 보고서</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --page: #f9f9f9;
+    --surface-1: #ffffff;
+    --text-primary: #191919;
+    --text-secondary: #666666;
+    --grid: #e7e7e7;
+    --axis: #c2c2c2;
+    --border: rgba(11, 11, 11, 0.10);
+    --code-bg: #f2f2f2;
+    --good-text: #006c10;
+    --critical: #dc3c3d;
+    --series-1: #257de0;   /* Python 3.9 */
+    --series-2: #f47230;   /* Python 3.12 */
+    --series-3: #00b894;   /* Python 3.14 */
+    --deemph: #8a8a8a;     /* 원본 (de-emphasis) */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --page: #0b0b0b;
+      --surface-1: #191919;
+      --text-primary: #efefef;
+      --text-secondary: #9c9c9c;
+      --grid: #303030;
+      --axis: #474747;
+      --border: rgba(255, 255, 255, 0.10);
+      --code-bg: #232323;
+      --good-text: #53c556;
+      --critical: #dc3c3d;
+      --series-1: #338ced;
+      --series-2: #e76624;
+      --series-3: #00a888;
+      --deemph: #6e6e6e;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --page: #0b0b0b;
+    --surface-1: #191919;
+    --text-primary: #efefef;
+    --text-secondary: #9c9c9c;
+    --grid: #303030;
+    --axis: #474747;
+    --border: rgba(255, 255, 255, 0.10);
+    --code-bg: #232323;
+    --good-text: #53c556;
+    --critical: #dc3c3d;
+    --series-1: #338ced;
+    --series-2: #e76624;
+    --series-3: #00a888;
+    --deemph: #6e6e6e;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body.viz-root {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 40px 24px 80px; }
+  header h1 { font-size: 28px; line-height: 1.25; margin: 0 0 6px; font-weight: 650; }
+  header p { margin: 0; color: var(--text-secondary); }
+  h2 { font-size: 20px; margin: 48px 0 12px; font-weight: 650; }
+  h3 { font-size: 16px; margin: 24px 0 8px; font-weight: 600; }
+  p, li { max-width: 72ch; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 4px 0; }
+  .muted { color: var(--text-secondary); }
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 20px 16px;
+    margin: 16px 0;
+  }
+  .card h3 { margin-top: 0; }
+  .card .sub { color: var(--text-secondary); margin: -4px 0 12px; font-size: 13px; }
+
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 24px 0 8px; }
+  .kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .kpi .label { color: var(--text-secondary); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .kpi .value { font-size: 34px; font-weight: 650; line-height: 1.2; margin-top: 4px; }
+  .kpi .delta { font-size: 13px; color: var(--text-secondary); }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  th { color: var(--text-secondary); font-weight: 600; font-size: 13px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.total td { font-weight: 650; border-top: 1px solid var(--axis); }
+  .table-wrap { overflow-x: auto; }
+  .strong { font-weight: 650; }
+  .good { color: var(--good-text); }
+
+  code, pre { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--text-secondary); margin: 0 0 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .chart { position: relative; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart text { font-family: inherit; }
+  .tick { fill: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .cat { fill: var(--text-primary); font-size: 13px; }
+  .cat-sub { fill: var(--text-secondary); font-size: 12px; }
+  .val { fill: var(--text-primary); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .ref-label { fill: var(--text-primary); font-size: 12px; font-weight: 600; }
+  .mark { cursor: default; outline: none; }
+  .mark:hover .bar, .mark:focus .bar { opacity: 0.78; }
+  .mark:focus-visible .hit { stroke: var(--text-primary); stroke-width: 1; }
+  .tooltip {
+    position: absolute; pointer-events: none; z-index: 2;
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    padding: 8px 10px; font-size: 13px; line-height: 1.4; white-space: nowrap;
+    opacity: 0; transition: opacity 80ms;
+  }
+  .tooltip .tv { font-weight: 650; font-size: 15px; display: block; }
+  .tooltip .tk { color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+  .tooltip .key { width: 12px; height: 2px; border-radius: 1px; display: inline-block; }
+  .callout { border-left: 3px solid var(--critical); padding: 4px 0 4px 14px; margin: 12px 0; }
+  .footer { margin-top: 56px; color: var(--text-secondary); font-size: 13px; }
+</style>
+</head>
+<body class="viz-root">
+<main>
+
+<header>
+  <h1>SimPy 4.0.2 성능 개선 보고서</h1>
+  <p>2026-11-26 · 대상: Container, Resource, Store와 프로세스를 많이 쓰는 DSE 시뮬레이션</p>
+</header>
+
+<section class="kpis" aria-label="원본 SimPy 4.0.2 (Python 3.9) 대비 9개 워크로드 합계 배수">
+  <div class="kpi">
+    <div class="label"><span class="swatch" style="background:var(--series-1)"></span>개선본 · Python 3.9 (현재 환경)</div>
+    <div class="value">2.06×</div>
+    <div class="delta">합계 9.90초 → 4.81초 · dse_mix 1.99×</div>
+  </div>
+  <div class="kpi">
+    <div class="label"><span class="swatch" style="background:var(--series-2)"></span>개선본 · Python 3.12</div>
+    <div class="value">2.16×</div>
+    <div class="delta">합계 4.59초 · dse_mix 2.05×</div>
+  </div>
+  <div class="kpi">
+    <div class="label"><span class="swatch" style="background:var(--series-3)"></span>개선본 · Python 3.14</div>
+    <div class="value">2.37×</div>
+    <div class="delta">합계 4.18초 · 9개 워크로드 모두 2× 이상</div>
+  </div>
+</section>
+<p class="muted">모든 배수는 원본 SimPy를 Python 3.9에서 돌린 결과 대비입니다. 측정 방식: 조합마다 새 프로세스에서 5라운드를 번갈아 실행한 중앙값. 6개 조합 모두 이벤트 순서 trace digest가 원본과 같습니다(불일치 0건).</p>
+
+<h2>결론</h2>
+<ul>
+  <li>SimPy 내부를 고치고 핵심 6개 모듈을 Cython으로 컴파일했습니다. API와 시뮬레이션 결과는 원본과 같습니다.</li>
+  <li>현재 환경(Python 3.9)에서 9개 워크로드 합계가 <span class="strong">2.06배</span> 빨라졌습니다. Python 3.14에서는 <span class="strong">2.37배</span>이고 모든 워크로드가 2배 이상입니다.</li>
+  <li>라이브러리 연산 자체(사용자 코드를 거의 뺀 측정)는 Python 3.9에서 <span class="strong">2.5~3.6배</span> 빨라졌습니다.</li>
+  <li>실제 모델에서 얼마나 빨라질지는 전체 시간 중 SimPy가 차지하는 비중에 따라 다릅니다. 사용자 코드(generator 본문, random 호출 등)는 이번 작업으로 빨라지지 않습니다.</li>
+</ul>
+
+<div class="card">
+  <h3>9개 워크로드 합계 시간</h3>
+  <p class="sub">Python 버전별로 원본과 개선본을 비교했습니다. 낮을수록 빠릅니다. 단위는 초이고, 아래 줄의 배수는 같은 Python 버전의 원본 대비입니다.</p>
+  <div class="legend" id="legend-totals"></div>
+  <div class="chart" id="chart-totals"></div>
+</div>
+
+<div class="card">
+  <h3>워크로드별 배수 (원본 Python 3.9 대비)</h3>
+  <p class="sub">개선본을 Python 버전별로 비교했습니다. 높을수록 빠르고, 세로선은 목표치 2배입니다.</p>
+  <div class="legend" id="legend-workloads"></div>
+  <div class="chart" id="chart-workloads"></div>
+  <h3>표: 중앙값(초)과 배수</h3>
+  <div class="table-wrap"><table id="table-results"></table></div>
+</div>
+
+<h2>어떻게 했는가</h2>
+<p>사용자분이 제안하신 6단계를 그대로 따랐습니다. 변경은 "하나 바꾸고 → 측정하고 → 유지 또는 되돌리기"를 반복하는 방식으로 진행했습니다.</p>
+<ol>
+  <li><span class="strong">기준 성능 측정.</span> seed를 고정한 결정적 워크로드 9개로 하네스를 만들었습니다(<code>bench/workloads.py</code>). 각 워크로드는 시뮬레이션 중 주요 시점을 trace로 남기고, 그 해시로 원본과 개선본의 이벤트 순서가 같은지 확인합니다. 같은 코드끼리 돌린 A/A 측정의 노이즈는 순수 Python에서 ±2%, 컴파일 트리끼리는 ±4%였습니다.</li>
+  <li><span class="strong">코드 전체 확인.</span> <code>core.py</code>, <code>events.py</code>, <code>resources/*.py</code>를 포함해 약 2,100줄을 전부 읽었습니다.</li>
+  <li><span class="strong">최적화 지점 도출.</span> 원본은 cProfile로 봤습니다. 컴파일 버전은 내부가 보이도록 <code>CY_PROFILE=1</code> 빌드로 봤습니다.</li>
+  <li><span class="strong">프로파일링.</span> 연산별 마이크로벤치(<code>bench/micro.py</code>)로 어떤 연산이 덜 빨라졌는지 찾았습니다.</li>
+  <li><span class="strong">개선 적용.</span> 비중이 큰 것부터 적용했습니다. 모든 변경은 회귀 게이트(<code>bench/gate.sh</code>)를 통과해야 남겼습니다. 게이트는 upstream 테스트 스위트, API 경계 동작 probe 29개(출력이 원본과 글자 단위로 같아야 함), 벤치마크 digest 일치를 확인합니다.</li>
+  <li><span class="strong">개선 후 측정.</span> Python 3.9, 3.12, 3.14 각각에서 원본과 개선본을 한꺼번에 번갈아 측정했습니다.</li>
+</ol>
+
+<h3>워크로드</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>워크로드</th><th>내용</th></tr></thead>
+  <tbody>
+    <tr><td>timeouts</td><td>프로세스 500개 × timeout 400회</td></tr>
+    <tr><td>spawn</td><td>짧은 프로세스 10만 개 생성, 일부 프로세스를 yield로 대기</td></tr>
+    <tr><td>resource</td><td><code>Resource(4)</code>에 사용자 1000명이 경쟁(큐가 김)</td></tr>
+    <tr><td>priority_resource</td><td><code>PriorityResource(4)</code>에 사용자 400명, 무작위 priority</td></tr>
+    <tr><td>container</td><td>producer/consumer 각 200개가 <code>Container</code> 공유</td></tr>
+    <tr><td>store</td><td>용량 10인 <code>Store</code> 6단 파이프라인, 아이템 3만 개</td></tr>
+    <tr><td>prio_filter_store</td><td><code>PriorityStore</code>와 <code>FilterStore</code></td></tr>
+    <tr><td>conditions</td><td><code>a | b</code>, <code>all_of</code> 조건 이벤트</td></tr>
+    <tr><td>dse_mix</td><td>생산 라인 모델: 짧은 job 프로세스 1.2만 개, 스테이션 6개(Resource/PriorityResource), 버퍼 Store, 공유 Container와 보충 프로세스, <code>req | timeout</code> renege</td></tr>
+  </tbody>
+</table></div>
+
+<h2>무엇을 했는가</h2>
+<p class="muted">효과는 해당 변경 직전 상태와 비교한 측정값입니다.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>#</th><th>변경</th><th>효과</th></tr></thead>
+  <tbody>
+    <tr><td>H1</td><td><code>SortedQueue.append</code>: 요청마다 큐 전체를 다시 정렬(O(n log n), lambda를 n번 호출)하던 것을 이진 삽입(bisect_right)으로 바꿈. 순서는 기존과 같음</td><td>priority_resource <span class="strong">2.99×</span></td></tr>
+    <tr><td>H2</td><td><code>Environment.run()</code>: 이벤트마다 <code>step()</code>을 호출하던 것을 루프 안으로 인라인. <code>step</code>을 재정의하거나 패치한 경우는 기존 경로 유지</td><td>3~8%</td></tr>
+    <tr><td>H3/H4</td><td>이벤트 스케줄링을 <code>heappush</code>로 직접 인라인하고 <code>Process._resume</code>을 정리</td><td>timeouts·spawn 약 1.17×</td></tr>
+    <tr><td>H5</td><td><code>Put</code>/<code>Get</code>: <code>super().__init__</code> 체인 제거, <code>_trigger_put/_get</code> 루프를 지역 변수로 바인딩</td><td>store·dse_mix 1.10×</td></tr>
+    <tr><td>C</td><td>핵심 6개 모듈(core, events, resources/base, container, resource, store)을 Cython으로 컴파일. <code>.py</code>는 그대로 두고 <code>.pxd</code>로 타입을 붙이는 pure-Python 모드</td><td>단독 약 1.75×</td></tr>
+    <tr><td>H6</td><td><code>Environment</code>, <code>Event</code>, <code>Timeout</code>, <code>Initialize</code>, <code>Process</code>, <code>Condition</code>을 cdef 클래스(C 구조체 필드)로 전환</td><td>1.15×</td></tr>
+    <tr><td>H7</td><td>hot path 지역 변수에 타입 지정, <code>__cinit__</code> 인자 제거</td><td>1.08×</td></tr>
+    <tr><td>H10</td><td><code>Put</code>/<code>Get</code> 계열 이벤트(Request, Release, StorePut, ContainerGet 등)를 cdef로 전환</td><td>resource 1.14×, dse_mix 1.09×</td></tr>
+    <tr><td>H11</td><td>리소스 클래스를 cdef로 전환하고 <code>_do_*</code>/<code>_trigger_*</code>를 cpdef(C 디스패치)로 바꿈. Python 서브클래스의 재정의는 그대로 존중</td><td>dse_mix 1.07×</td></tr>
+    <tr><td>H12</td><td><code>Event.succeed</code>를 cpdef로 바꾸고 인자 변환 버그 수정(아래 참고)</td><td>1.03×</td></tr>
+    <tr><td>P</td><td>설치용 <code>setup.py</code>(wheel 빌드)와 <code>importlib.metadata</code> 기반 버전 조회. setuptools 81 이상에서 원본 4.0.2가 import부터 실패하는 문제를 해결</td><td>—</td></tr>
+  </tbody>
+</table></div>
+<p><span class="strong">노이즈 범위라서 되돌린 것:</span> Condition 초기화 정리(0.97~1.03×), Cython <code>binding=False</code>(0.98×), 힙 항목 3-tuple 압축(0.99×), 리소스 필드만 cdef로 바꾸기(1.01×, 이후 H11로 합쳐서 다시 적용).</p>
+
+<h2>정확성 검증과 발견한 버그</h2>
+<ul>
+  <li><span class="strong">upstream 테스트 스위트:</span> 원본과 같은 결과입니다(129개 통과, 1개 실패). 실패하는 <code>test_exception_chaining</code>은 원본도 Windows 경로 문제로 똑같이 실패합니다. 벽시계 시간에 의존하는 <code>test_rt.py</code>는 원본에서도 흔들려서 최대 3회 재시도합니다.</li>
+  <li><span class="strong">trace digest:</span> 6개 조합 모두에서 원본과 일치합니다.</li>
+  <li><span class="strong">API 경계 동작 probe:</span> float, numpy, Fraction 값을 priority·capacity·amount·delay로 넣거나, <code>fail()</code>에 예외가 아닌 값을 넣는 등 29개 경우의 출력이 원본과 글자 단위로 같습니다. numpy가 없는 3.12/3.14 venv에서는 24개입니다.</li>
+</ul>
+<div class="callout">
+  <p class="strong" style="margin:0 0 4px">작업 중 발견하고 고친 버그</p>
+  <p style="margin:0">Cython은 기본적으로 함수 인자의 타입 annotation을 실제 타입 검사로 씁니다. 그래서 컴파일 버전에서 <code>priority=1.5</code>가 1로 잘렸고, <span class="strong">요청 처리 순서가 원본과 달라졌습니다.</span> <code>capacity=inf</code>는 OverflowError를 냈고, <code>fail('x')</code>의 예외 종류도 바뀌었습니다. 벤치는 정수 priority만 썼고 기존 테스트도 이 경우를 다루지 않아서 처음에는 드러나지 않았습니다. <code>annotation_typing=False</code>로 annotation을 문서 용도로만 남기고 타입 지정은 전부 <code>.pxd</code>로 옮겨서 고쳤습니다. 같은 문제를 다시 잡도록 <code>bench/compat.py</code>를 게이트에 넣었습니다.</p>
+</div>
+
+<h2>원본과 동작이 다른 점</h2>
+<p>일반적인 사용(<code>env.process</code>, <code>timeout</code>, <code>request</code>/<code>put</code>/<code>get</code>, <code>with</code> 문, interrupt, 조건 이벤트)에는 차이가 없습니다. 차이는 다음과 같은 드문 사용 방식에서만 생깁니다.</p>
+<ol>
+  <li><code>Environment.schedule()</code>을 서브클래스에서 재정의해도 내장 이벤트는 그 메서드를 거치지 않고 큐에 직접 넣습니다. <code>env.step</code>을 재정의하거나 패치하는 방식은 그대로 동작합니다.</li>
+  <li>(컴파일 버전) 이벤트의 <code>env</code>는 <code>Environment</code>(또는 서브클래스)이거나 None이어야 합니다. <code>Put</code>/<code>Get</code>의 <code>resource</code>는 <code>BaseResource</code> 서브클래스여야 합니다. duck-typing으로 만든 가짜 객체는 TypeError가 납니다.</li>
+  <li>(컴파일 버전) <code>Put</code>, <code>Get</code>, <code>BaseResource</code>가 더 이상 <code>typing.Generic</code>/<code>ContextManager</code>를 상속하지 않습니다. <code>Put[X]</code> subscript와 <code>isinstance(req, AbstractContextManager)</code>는 그대로 동작합니다.</li>
+  <li>(컴파일 버전) <code>_do_put</code>/<code>_do_get</code>은 자기 이벤트 타입을 기대합니다. Python 서브클래스에서 재정의하는 것은 그대로 지원합니다.</li>
+  <li><code>run()</code> 경로의 traceback에 <code>step</code> 프레임이 하나 빠집니다.</li>
+</ol>
+
+<h2>연산별 비용</h2>
+<p class="muted">마이크로벤치 결과입니다. 단위는 ns/회입니다. <code>bench/micro.py</code>를 2번 실행해 더 작은 값을 썼고, 각 실행도 3회 반복 중 최솟값입니다. 배수는 같은 Python 버전의 원본 대비입니다.</p>
+<div class="table-wrap"><table id="table-micro"></table></div>
+<p><span class="strong">아직 설명하지 못한 점:</span> 개선본의 연산당 비용이 3.14에서 3.9보다 큽니다(timeout 391 → 521ns). GC를 꺼도 수치가 같아서 GC는 원인이 아닙니다. Cython이 3.14용으로 생성하는 코드 경로를 의심하지만 검증하지 않은 추정입니다. 그래도 사용자 코드가 빨라진 몫이 더 커서 end-to-end로는 3.14가 가장 빠릅니다.</p>
+
+<h2>사용 방법</h2>
+<pre><code>:: 현재 Python 3.9 환경에 설치 (기존 simpy 4.0.2를 대체)
+pip install C:\Users\82103\simpy\dist\simpy-4.0.2+fast1-cp39-cp39-win_amd64.whl
+
+:: 되돌리기
+pip install simpy==4.0.2</code></pre>
+<ul>
+  <li>코드는 수정할 필요가 없습니다. <code>import simpy</code> 그대로 씁니다. <code>simpy.__version__</code>이 <code>4.0.2+fast1</code>이고 <code>simpy.events.__file__</code>이 <code>.pyd</code>로 끝나면 컴파일 버전이 로드된 것입니다.</li>
+  <li>Python 3.12/3.14용 wheel(<code>cp312</code>, <code>cp314</code>)도 <code>dist/</code>에 있습니다. 세 wheel 모두 깨끗한 venv에 설치해서 테스트했습니다.</li>
+  <li>다시 빌드하려면 <code>pip wheel . --no-build-isolation</code>을 실행합니다. Cython과 MSVC(VS 2017 이상)가 필요합니다.</li>
+  <li>C 컴파일러가 없는 환경에서는 <code>src/simpy</code>를 순수 Python으로 쓸 수 있습니다. 이 경우 합계 1.20배입니다(priority_resource 3.37배).</li>
+</ul>
+
+<h2>추가로 권하는 것 (라이브러리 밖)</h2>
+<ol>
+  <li><span class="strong">Python 3.14로 올리기.</span> 같은 개선본이 2.06배에서 2.37배로 올라갑니다. 3.12와 3.14 측정은 uv로 만든 격리 환경(<code>build/venv312</code>, <code>build/venv314</code>)에서 했고, 시스템 Python은 건드리지 않았습니다.</li>
+  <li><span class="strong">GC 조정.</span> conditions 워크로드에서 GC를 끄면 1.03초가 0.80초로 줄었습니다(약 20%, 진단용 2회 측정). dse_mix에서는 차이가 없었습니다. 모델 구성이 끝난 뒤 <code>gc.freeze()</code>를 호출하거나 <code>gc.set_threshold()</code> 값을 키워 보시길 권합니다.</li>
+  <li><span class="strong">사용자 코드의 <code>random.randint</code> 줄이기.</span> 한 번에 542ns가 걸리는데, 이는 개선본에서 timeout 하나를 처리하는 비용(약 400ns)보다 큽니다. numpy로 난수를 미리 생성하거나 <code>random.random()</code> 기반으로 바꾸면 체감 속도가 더 오릅니다.</li>
+</ol>
+
+<h2>다음에 해볼 만한 것</h2>
+<ol>
+  <li>3.14에서 늘어난 연산당 비용의 원인 찾기</li>
+  <li><code>ConditionValue</code>를 cdef로 전환하고 조건 이벤트 경로 정리하기(conditions가 3.9에서 1.57배로 가장 낮음)</li>
+  <li>실제 DSE 모델을 <code>CY_PROFILE=1</code> 빌드로 프로파일하기</li>
+</ol>
+
+<h2>파일 안내</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>경로</th><th>내용</th></tr></thead>
+  <tbody>
+    <tr><td><code>src/simpy/</code></td><td>개선된 소스(<code>.py</code>와 <code>.pxd</code>)</td></tr>
+    <tr><td><code>upstream/</code></td><td>원본 SimPy 4.0.2 소스와 테스트(비교 기준)</td></tr>
+    <tr><td><code>dist/</code></td><td>설치용 wheel(cp39, cp312, cp314)</td></tr>
+    <tr><td><code>bench/bench.py</code>, <code>bench/workloads.py</code></td><td>A/B 측정 드라이버와 워크로드</td></tr>
+    <tr><td><code>bench/gate.sh</code>, <code>bench/compat.py</code></td><td>회귀 게이트와 경계 동작 probe</td></tr>
+    <tr><td><code>bench/micro.py</code>, <code>bench/profile_one.py</code></td><td>연산별 마이크로벤치와 프로파일러</td></tr>
+    <tr><td><code>setup.py</code>, <code>build_cython.py</code>, <code>cython_config.py</code></td><td>wheel 빌드, 벤치용 빌드, 공용 Cython 설정</td></tr>
+    <tr><td><code>REPORT.md</code></td><td>이 보고서의 Markdown 버전</td></tr>
+    <tr><td><code>decisions.tsv</code></td><td>시도한 모든 가설과 결과를 기록한 로그(git 미포함)</td></tr>
+  </tbody>
+</table></div>
+
+<p class="footer">측정 환경: Windows 10, Intel i5-10400(6코어 12스레드), Python 3.9.2 / 3.12.11 / 3.14.10, Cython 3.3.2, MSVC 14.16(VS 2017). 측정하는 동안 브라우저 등 다른 프로세스가 돌고 있었습니다. 그래서 원본과 개선본을 번갈아 실행해 같은 노이즈를 받게 했습니다.</p>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var NS = 'http://www.w3.org/2000/svg';
+
+  // bench/results/final.txt: median seconds over 5 alternating rounds, and
+  // the speedups the benchmark printed (computed from unrounded medians).
+  var WORKLOADS = ['timeouts', 'spawn', 'resource', 'priority_resource', 'container',
+                   'store', 'prio_filter_store', 'conditions', 'dse_mix'];
+  var SEC = {
+    base39:  [0.515, 0.610, 0.840, 1.004, 0.307, 1.752, 0.467, 1.513, 2.891],
+    cy39:    [0.302, 0.290, 0.386, 0.182, 0.163, 0.817, 0.251, 0.961, 1.453],
+    base312: [0.367, 0.455, 0.508, 0.705, 0.192, 1.074, 0.327, 1.104, 2.086],
+    cy312:   [0.300, 0.309, 0.378, 0.169, 0.154, 0.761, 0.240, 0.867, 1.413],
+    base314: [0.332, 0.431, 0.470, 0.658, 0.174, 1.012, 0.313, 0.908, 1.988],
+    cy314:   [0.252, 0.288, 0.346, 0.149, 0.142, 0.715, 0.231, 0.751, 1.304]
+  };
+  var TOTAL = { base39: 9.900, cy39: 4.806, base312: 6.819, cy312: 4.592, base314: 6.287, cy314: 4.177 };
+  var X = { // speedup vs base39, as printed by bench.py
+    cy39:    [1.71, 2.10, 2.17, 5.52, 1.89, 2.15, 1.86, 1.57, 1.99],
+    base312: [1.40, 1.34, 1.66, 1.42, 1.60, 1.63, 1.43, 1.37, 1.39],
+    cy312:   [1.72, 1.98, 2.22, 5.96, 1.99, 2.30, 1.95, 1.75, 2.05],
+    base314: [1.55, 1.41, 1.79, 1.53, 1.77, 1.73, 1.49, 1.67, 1.45],
+    cy314:   [2.05, 2.12, 2.43, 6.76, 2.17, 2.45, 2.02, 2.01, 2.22]
+  };
+  var X_TOTAL = { cy39: 2.06, base312: 1.45, cy312: 2.16, base314: 1.57, cy314: 2.37 };
+  var SERIES = [
+    { key: 'cy39',  label: 'Python 3.9',  color: 'var(--series-1)' },
+    { key: 'cy312', label: 'Python 3.12', color: 'var(--series-2)' },
+    { key: 'cy314', label: 'Python 3.14', color: 'var(--series-3)' }
+  ];
+  var MICRO = [ // ns per op: base39, cy39, base314, cy314
+    ['timeout', 1337, 391, 861, 521],
+    ['event succeed', 1364, 382, 919, 554],
+    ['spawn (process 생성 + 대기)', 4357, 1462, 3197, 1883],
+    ['Resource request/release', 6986, 2686, 3634, 2538],
+    ['PriorityResource', 8574, 3433, 4607, 3189],
+    ['Store put/get', 6676, 2621, 3679, 2429],
+    ['Container put/get', 7147, 2739, 3788, 2775],
+    ['any_of', 6086, 2334, 4228, 2700],
+    ['all_of', 6077, 2095, 4194, 2581]
+  ];
+
+  function el(name, attrs, parent) {
+    var node = document.createElementNS(NS, name);
+    for (var k in attrs) node.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(node);
+    return node;
+  }
+  function text(parent, x, y, str, cls, anchor) {
+    var t = el('text', { x: x, y: y, 'class': cls, 'text-anchor': anchor || 'start' }, parent);
+    t.textContent = str;
+    return t;
+  }
+  function fmt(v, d) { return v.toFixed(d); }
+
+  // Bar with a 4px rounded data end and a square baseline end.
+  function hbarPath(x0, y, w, h) {
+    var r = Math.min(4, h / 2, w);
+    return 'M' + x0 + ',' + y + 'H' + (x0 + w - r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x0 + w) + ',' + (y + r) +
+           'V' + (y + h - r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x0 + w - r) + ',' + (y + h) + 'H' + x0 + 'Z';
+  }
+  function vbarPath(x, yBase, w, h) {
+    var r = Math.min(4, w / 2, h);
+    var top = yBase - h;
+    return 'M' + x + ',' + yBase + 'V' + (top + r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x + r) + ',' + top +
+           'H' + (x + w - r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x + w) + ',' + (top + r) + 'V' + yBase + 'Z';
+  }
+
+  function legend(id, items, shape) {
+    var box = document.getElementById(id);
+    items.forEach(function (it) {
+      var s = document.createElement('span');
+      var sw = document.createElement('span');
+      sw.className = 'swatch';
+      sw.style.background = it.color;
+      if (shape === 'line') { sw.style.height = '3px'; sw.style.width = '14px'; }
+      s.appendChild(sw);
+      s.appendChild(document.createTextNode(it.label));
+      box.appendChild(s);
+    });
+  }
+
+  function makeTooltip(container) {
+    var tip = document.createElement('div');
+    tip.className = 'tooltip';
+    tip.setAttribute('role', 'status');
+    container.appendChild(tip);
+    return {
+      show: function (evt, value, rows, anchorEl) {
+        tip.replaceChildren();
+        var v = document.createElement('span');
+        v.className = 'tv';
+        v.textContent = value;
+        tip.appendChild(v);
+        rows.forEach(function (r) {
+          var row = document.createElement('span');
+          row.className = 'tk';
+          if (r.color) {
+            var key = document.createElement('span');
+            key.className = 'key';
+            key.style.background = r.color;
+            row.appendChild(key);
+          }
+          row.appendChild(document.createTextNode(r.text));
+          tip.appendChild(row);
+        });
+        var cr = container.getBoundingClientRect();
+        var x, y;
+        if (evt && evt.clientX !== undefined && evt.type !== 'focus') {
+          x = evt.clientX - cr.left; y = evt.clientY - cr.top;
+        } else {
+          var br = anchorEl.getBoundingClientRect();
+          x = br.left + br.width / 2 - cr.left; y = br.top - cr.top;
+        }
+        tip.style.opacity = '1';
+        var tw = tip.offsetWidth, th = tip.offsetHeight;
+        var left = Math.min(Math.max(x + 12, 0), cr.width - tw);
+        var top = y - th - 12;
+        if (top < 0) top = y + 16;
+        tip.style.left = left + 'px';
+        tip.style.top = top + 'px';
+      },
+      hide: function () { tip.style.opacity = '0'; }
+    };
+  }
+
+  function bindHover(g, tooltip, getContent) {
+    function on(evt) { var c = getContent(); tooltip.show(evt, c.value, c.rows, g); }
+    g.addEventListener('pointermove', on);
+    g.addEventListener('pointerenter', on);
+    g.addEventListener('pointerleave', tooltip.hide);
+    g.addEventListener('focus', on);
+    g.addEventListener('blur', tooltip.hide);
+  }
+
+  // Chart 1: totals per Python version, original (gray) vs improved (version hue).
+  (function totals() {
+    var groups = [
+      { label: 'Python 3.9',  base: 'base39',  cy: 'cy39',  color: 'var(--series-1)' },
+      { label: 'Python 3.12', base: 'base312', cy: 'cy312', color: 'var(--series-2)' },
+      { label: 'Python 3.14', base: 'base314', cy: 'cy314', color: 'var(--series-3)' }
+    ];
+    legend('legend-totals', [{ label: '원본 SimPy 4.0.2', color: 'var(--deemph)' }].concat(
+      SERIES.map(function (s) { return { label: '개선본 · ' + s.label, color: s.color }; })));
+    var container = document.getElementById('chart-totals');
+    var W = 880, H = 300, L = 48, R = 16, T = 24, B = 56;
+    var svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img',
+      'aria-label': '9개 워크로드 합계 시간. 원본 대비 개선본: Python 3.9 9.90초에서 4.81초, Python 3.12 6.82초에서 4.59초, Python 3.14 6.29초에서 4.18초.' }, container);
+    var maxV = 10, plotH = H - T - B, plotW = W - L - R;
+    function y(v) { return T + plotH - v / maxV * plotH; }
+    for (var t = 0; t <= maxV; t += 2) {
+      el('line', { x1: L, x2: W - R, y1: y(t), y2: y(t), stroke: t === 0 ? 'var(--axis)' : 'var(--grid)', 'stroke-width': 1 }, svg);
+      text(svg, L - 8, y(t) + 4, t + '초', 'tick', 'end');
+    }
+    var tooltip = makeTooltip(container);
+    var band = plotW / groups.length, bw = 24, gap = 2;
+    groups.forEach(function (gr, i) {
+      var cx = L + band * i + band / 2;
+      [{ key: gr.base, color: 'var(--deemph)', name: '원본', x: cx - bw - gap / 2 },
+       { key: gr.cy, color: gr.color, name: '개선본', x: cx + gap / 2 }].forEach(function (b) {
+        var v = TOTAL[b.key];
+        var g = el('g', { 'class': 'mark', tabindex: 0,
+          'aria-label': gr.label + ' ' + b.name + ' ' + fmt(v, 2) + '초' }, svg);
+        el('rect', { 'class': 'hit', x: b.x - 4, y: T, width: bw + 8, height: plotH, fill: 'transparent' }, g);
+        el('path', { 'class': 'bar', d: vbarPath(b.x, y(0), bw, y(0) - y(v)), fill: b.color }, g);
+        text(svg, b.x + bw / 2, y(v) - 6, fmt(v, 2), 'val', 'middle');
+        bindHover(g, tooltip, function () {
+          var rows = [{ text: gr.label + ' · ' + b.name, color: b.color }];
+          if (b.name === '개선본') {
+            rows.push({ text: '같은 버전 원본 대비 ' + fmt(TOTAL[gr.base] / v, 2) + '×' });
+            rows.push({ text: '원본 Python 3.9 대비 ' + fmt(X_TOTAL[gr.cy], 2) + '×' });
+          } else if (gr.base !== 'base39') {
+            rows.push({ text: '원본 Python 3.9 대비 ' + fmt(X_TOTAL[gr.base], 2) + '×' });
+          }
+          return { value: fmt(v, 2) + '초', rows: rows };
+        });
+      });
+      text(svg, cx, H - B + 22, gr.label, 'cat', 'middle');
+      text(svg, cx, H - B + 40, '개선본 ' + fmt(TOTAL[gr.base] / TOTAL[gr.cy], 2) + '× (같은 버전 원본 대비)', 'cat-sub', 'middle');
+    });
+  })();
+
+  // Chart 2: per-workload speedup vs upstream on 3.9, three Python versions.
+  (function workloads() {
+    legend('legend-workloads', SERIES.map(function (s) { return { label: '개선본 · ' + s.label, color: s.color }; }));
+    var container = document.getElementById('chart-workloads');
+    var rowH = 44, bh = 8, gap = 2, T = 28, B = 28, L = 150, R = 56, W = 880;
+    var H = T + rowH * WORKLOADS.length + B;
+    var svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img',
+      'aria-label': '워크로드별 배수. 표에 모든 값이 있습니다.' }, container);
+    var maxV = 7, plotW = W - L - R;
+    function x(v) { return L + v / maxV * plotW; }
+    for (var t = 0; t <= maxV; t++) {
+      el('line', { x1: x(t), x2: x(t), y1: T - 8, y2: H - B, stroke: t === 0 ? 'var(--axis)' : 'var(--grid)', 'stroke-width': 1 }, svg);
+      text(svg, x(t), H - B + 18, t + '×', 'tick', 'middle');
+    }
+    var tooltip = makeTooltip(container);
+    WORKLOADS.forEach(function (w, i) {
+      var y0 = T + rowH * i + (rowH - (bh * 3 + gap * 2)) / 2;
+      text(svg, L - 12, y0 + bh * 1.5 + gap + 4, w, 'cat', 'end');
+      SERIES.forEach(function (s, j) {
+        var v = X[s.key][i];
+        var yb = y0 + j * (bh + gap);
+        var g = el('g', { 'class': 'mark', tabindex: 0,
+          'aria-label': w + ' ' + s.label + ' ' + fmt(v, 2) + '배' }, svg);
+        el('rect', { 'class': 'hit', x: L, y: yb - 1, width: plotW + R, height: bh + gap, fill: 'transparent' }, g);
+        el('path', { 'class': 'bar', d: hbarPath(x(0), yb, x(v) - x(0), bh), fill: s.color }, g);
+        bindHover(g, tooltip, function () {
+          return { value: fmt(v, 2) + '×', rows: [
+            { text: w + ' · 개선본 ' + s.label, color: s.color },
+            { text: fmt(SEC[s.key][i], 3) + '초 (원본 3.9: ' + fmt(SEC.base39[i], 3) + '초)' }
+          ] };
+        });
+      });
+      // Direct label only on the one row past the axis story: the max.
+      if (w === 'priority_resource') {
+        text(svg, x(X.cy314[i]) + 6, y0 + 2 * (bh + gap) + bh, fmt(X.cy314[i], 2) + '×', 'val', 'start');
+      }
+    });
+    // Target reference line at 2x.
+    el('line', { x1: x(2), x2: x(2), y1: T - 12, y2: H - B, stroke: 'var(--text-primary)', 'stroke-width': 1 }, svg);
+    text(svg, x(2) + 6, T - 2, '목표 2×', 'ref-label', 'start');
+  })();
+
+  // Table view for chart 2 (always visible).
+  (function resultsTable() {
+    var tbl = document.getElementById('table-results');
+    var cols = [['base39', '원본 3.9'], ['cy39', '개선본 3.9'], ['base312', '원본 3.12'], ['cy312', '개선본 3.12'],
+                ['base314', '원본 3.14'], ['cy314', '개선본 3.14']];
+    var thead = tbl.createTHead().insertRow();
+    function th(row, s, num) { var c = document.createElement('th'); c.textContent = s; if (num) c.className = 'num'; row.appendChild(c); }
+    th(thead, '워크로드');
+    cols.forEach(function (c) { th(thead, c[1], true); });
+    var tb = tbl.createTBody();
+    function addRow(name, secs, xs, cls) {
+      var r = tb.insertRow();
+      if (cls) r.className = cls;
+      var c0 = r.insertCell(); c0.textContent = name;
+      cols.forEach(function (c) {
+        var cell = r.insertCell();
+        cell.className = 'num';
+        var s = fmt(secs[c[0]], 3) + '초';
+        if (c[0] !== 'base39') s += ' · ' + fmt(xs[c[0]], 2) + '×';
+        cell.textContent = s;
+        if (c[0].indexOf('cy') === 0 && xs[c[0]] >= 2) cell.classList.add('strong');
+      });
+    }
+    WORKLOADS.forEach(function (w, i) {
+      var secs = {}, xs = {};
+      cols.forEach(function (c) { secs[c[0]] = SEC[c[0]][i]; if (X[c[0]]) xs[c[0]] = X[c[0]][i]; });
+      addRow(w, secs, xs);
+    });
+    addRow('합계', TOTAL, X_TOTAL, 'total');
+  })();
+
+  (function microTable() {
+    var tbl = document.getElementById('table-micro');
+    var head = tbl.createTHead().insertRow();
+    ['연산', '원본 3.9', '개선본 3.9', '배수', '원본 3.14', '개선본 3.14', '배수'].forEach(function (s, i) {
+      var c = document.createElement('th'); c.textContent = s; if (i) c.className = 'num'; head.appendChild(c);
+    });
+    var tb = tbl.createTBody();
+    MICRO.forEach(function (m) {
+      var r = tb.insertRow();
+      var vals = [m[0], m[1], m[2], fmt(m[1] / m[2], 2) + '×', m[3], m[4], fmt(m[3] / m[4], 2) + '×'];
+      vals.forEach(function (v, i) {
+        var c = r.insertCell();
+        c.textContent = typeof v === 'number' ? v.toLocaleString('en-US') : v;
+        if (i) c.className = 'num';
+        if (i === 3) c.classList.add('strong');
+      });
+    });
+  })();
+})();
+</script>
+</body>
+</html>
