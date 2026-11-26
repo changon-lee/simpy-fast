@@ -20,7 +20,7 @@ from typing import (
 )
 
 from simpy.core import BoundClass, Environment
-from simpy.events import Event, Process
+from simpy.events import PENDING, Event, Process
 
 ResourceType = TypeVar('ResourceType', bound='BaseResource')
 
@@ -41,12 +41,13 @@ class Put(Event, ContextManager['Put'], Generic[ResourceType]):
     """
 
     def __init__(self, resource: ResourceType):
-        super().__init__(resource._env)
+        # NOTE: Event.__init__() is inlined for performance reasons.
+        self.env = env = resource._env
+        self.callbacks = [resource._trigger_get]
         self.resource = resource
-        self.proc: Optional[Process] = self.env.active_process
+        self.proc: Optional[Process] = env._active_proc
 
         resource.put_queue.append(self)
-        self.callbacks.append(resource._trigger_get)
         resource._trigger_put(None)
 
     def __enter__(self) -> 'Put':
@@ -72,7 +73,7 @@ class Put(Event, ContextManager['Put'], Generic[ResourceType]):
         method is called automatically.
 
         """
-        if not self.triggered:
+        if self._value is PENDING:
             self.resource.put_queue.remove(self)
 
 
@@ -92,12 +93,13 @@ class Get(Event, ContextManager['Get'], Generic[ResourceType]):
     """
 
     def __init__(self, resource: ResourceType):
-        super().__init__(resource._env)
+        # NOTE: Event.__init__() is inlined for performance reasons.
+        self.env = env = resource._env
+        self.callbacks = [resource._trigger_put]
         self.resource = resource
-        self.proc = self.env.active_process
+        self.proc = env._active_proc
 
         resource.get_queue.append(self)
-        self.callbacks.append(resource._trigger_put)
         resource._trigger_get(None)
 
     def __enter__(self) -> 'Get':
@@ -123,7 +125,7 @@ class Get(Event, ContextManager['Get'], Generic[ResourceType]):
         method is called automatically.
 
         """
-        if not self.triggered:
+        if self._value is PENDING:
             self.resource.get_queue.remove(self)
 
 
@@ -222,13 +224,15 @@ class BaseResource(Generic[PutType, GetType]):
         # This code is not very pythonic because the queue interface should be
         # simple (only append(), pop(), __getitem__() and __len__() are
         # required).
+        put_queue = self.put_queue
+        do_put = self._do_put
         idx = 0
-        while idx < len(self.put_queue):
-            put_event = self.put_queue[idx]
-            proceed = self._do_put(put_event)
-            if not put_event.triggered:
+        while idx < len(put_queue):
+            put_event = put_queue[idx]
+            proceed = do_put(put_event)
+            if put_event._value is PENDING:
                 idx += 1
-            elif self.put_queue.pop(idx) != put_event:
+            elif put_queue.pop(idx) is not put_event:
                 raise RuntimeError('Put queue invariant violated')
 
             if not proceed:
@@ -262,13 +266,15 @@ class BaseResource(Generic[PutType, GetType]):
         # This code is not very pythonic because the queue interface should be
         # simple (only append(), pop(), __getitem__() and __len__() are
         # required).
+        get_queue = self.get_queue
+        do_get = self._do_get
         idx = 0
-        while idx < len(self.get_queue):
-            get_event = self.get_queue[idx]
-            proceed = self._do_get(get_event)
-            if not get_event.triggered:
+        while idx < len(get_queue):
+            get_event = get_queue[idx]
+            proceed = do_get(get_event)
+            if get_event._value is PENDING:
                 idx += 1
-            elif self.get_queue.pop(idx) != get_event:
+            elif get_queue.pop(idx) is not get_event:
                 raise RuntimeError('Get queue invariant violated')
 
             if not proceed:

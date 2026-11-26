@@ -125,7 +125,7 @@ class PriorityRequest(Request):
         """Indicates whether the request should preempt a resource user or not
         (:class:`PriorityResource` ignores this flag)."""
 
-        self.time = resource._env.now
+        self.time = resource._env._now
         """The time at which the request was made."""
 
         self.key = (self.priority, self.time, not self.preempt)
@@ -216,9 +216,9 @@ class Resource(base.BaseResource):
         release = BoundClass(Release)
 
     def _do_put(self, event: Request) -> None:
-        if len(self.users) < self.capacity:
+        if len(self.users) < self._capacity:
             self.users.append(event)
-            event.usage_since = self._env.now
+            event.usage_since = self._env._now
             event.succeed()
 
     def _do_get(self, event: Release) -> None:
@@ -282,7 +282,7 @@ class PreemptiveResource(PriorityResource):
     def _do_put(  # type: ignore[override] # noqa: F821
         self, event: PriorityRequest
     ) -> None:
-        if len(self.users) >= self.capacity and event.preempt:
+        if len(self.users) >= self._capacity and event.preempt:
             # Check if we can preempt another process
             preempt = sorted(self.users, key=lambda e: e.key)[-1]
             if preempt.key > event.key:
