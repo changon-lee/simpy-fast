@@ -13,7 +13,6 @@ used, there are several specialized subclasses of it.
     ~simpy.events.AllOf
 
 """
-from heapq import heappush
 from types import FrameType
 from typing import (
     TYPE_CHECKING,
@@ -33,6 +32,17 @@ from simpy.exceptions import Interrupt
 
 if TYPE_CHECKING and TYPE_CHECKING != 'SPHINX':  # Avoid circular import
     from simpy.core import Environment, SimTime
+
+cdef object _ZERO = 0
+
+
+cdef inline int _env_schedule(Environment env, object event, object priority,
+                              object delay, int nargs) except -1:
+    # ``env.schedule(event[, priority[, delay]])`` with *nargs* arguments.
+    if env is None:
+        getattr(env, 'schedule')  # The AttributeError upstream raises.
+    return env._schedule(event, priority, delay, nargs)
+
 
 PENDING: object = object()
 """Unique object to identify pending values of events."""
@@ -172,8 +182,7 @@ cdef class Event:
         """
         self._ok = event._ok
         self._value = event._value
-        env = self.env
-        heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
+        _env_schedule(self.env, self, NORMAL, _ZERO, 1)
 
     cpdef succeed(self, value=None):
         """Set the event's value, mark it as successful and schedule it for
@@ -187,8 +196,7 @@ cdef class Event:
 
         self._ok = True
         self._value = value
-        env = self.env
-        heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
+        _env_schedule(self.env, self, NORMAL, _ZERO, 1)
         return self
 
     def fail(self, exception: Exception) -> 'Event':
@@ -206,8 +214,7 @@ cdef class Event:
             raise ValueError(f'{exception} is not an exception.')
         self._ok = False
         self._value = exception
-        env = self.env
-        heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
+        _env_schedule(self.env, self, NORMAL, _ZERO, 1)
         return self
 
     def __and__(self, other: 'Event') -> 'Condition':
@@ -257,8 +264,7 @@ cdef class Timeout(Event):
         self._value = value
         self._delay = delay
         self._ok = True
-        env_ = self.env  # Same object; a typed local when compiled.
-        heappush(env_._queue, (env_._now + delay, NORMAL, next(env_._eid), self))
+        _env_schedule(self.env, self, NORMAL, delay, 3)
 
     def _desc(self) -> str:
         """Return a string *Timeout(delay[, value=value])*."""
@@ -284,8 +290,7 @@ cdef class Initialize(Event):
         # will be handled before interrupts. Otherwise, a process whose
         # generator has not yet been started could be interrupted.
         self._ok = True
-        env_ = self.env  # Same object; a typed local when compiled.
-        heappush(env_._queue, (env_._now, URGENT, next(env_._eid), self))
+        _env_schedule(self.env, self, URGENT, _ZERO, 2)
 
 
 class Interruption(Event):
@@ -314,8 +319,8 @@ class Interruption(Event):
             raise RuntimeError('A process is not allowed to interrupt itself.')
 
         self.process = process
-        env = self.env
-        heappush(env._queue, (env._now, URGENT, next(env._eid), self))
+        cdef Environment env = self.env
+        _env_schedule(env, self, URGENT, _ZERO, 2)
 
     def _interrupt(self, event: Event) -> None:
         # Ignore dead processes. Multiple concurrently scheduled interrupts
@@ -429,7 +434,7 @@ cdef class Process(Event):
                 # Process has terminated.
                 self._ok = True
                 self._value = e.args[0] if len(e.args) else None
-                heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
+                _env_schedule(env, self, NORMAL, _ZERO, 1)
                 next_event = None
                 break
             except BaseException as e:
@@ -439,7 +444,7 @@ cdef class Process(Event):
                 # does not add any useful information.
                 e.__traceback__ = e.__traceback__.tb_next  # type: ignore
                 self._value = e
-                heappush(env._queue, (env._now, NORMAL, next(env._eid), self))
+                _env_schedule(env, self, NORMAL, _ZERO, 1)
                 next_event = None
                 break
 

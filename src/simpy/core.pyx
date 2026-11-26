@@ -2,6 +2,10 @@
 Core components for event-discrete simulation environments.
 
 """
+cimport cython
+from cpython.object cimport PyObject, PyTypeObject
+from cpython.ref cimport Py_DECREF
+
 from heapq import heappush, heappop
 from itertools import count
 from types import MethodType
@@ -30,6 +34,28 @@ from simpy.events import (
     NORMAL,
 )
 
+
+cdef extern from "_cheap.h":
+    ctypedef struct SimpyQEntry:
+        PyObject *time
+        PyObject *event
+    int simpy_heap_ready() except -1
+    object simpy_heap_new()
+    Py_ssize_t simpy_heap_len(object heap)
+    PyObject *simpy_heap_top_time(object heap)
+    bint simpy_time_key(object o, double *out)
+    bint simpy_prio_key(object o, long long *out)
+    int simpy_heap_push(object heap, double t, long long prio,
+                        unsigned long long eid, object time,
+                        object event) except -1
+    void simpy_heap_pop(object heap, SimpyQEntry *out)
+    object simpy_heap_to_list(object heap)
+
+cdef extern from "_cfast.h":
+    bint simpy_plain(object obj, PyTypeObject *base, object name, object func)
+    object simpy_add_zero(object now, object zero)
+
+simpy_heap_ready()
 
 Infinity: float = float('inf')  #: Convenience alias for infinity
 
@@ -100,12 +126,23 @@ cdef class Environment:
 
     """
 
+    # The event queue lives in a C heap (_heap, see _cheap.h) as long as all
+    # keys are plain numbers. When a key is not, or Python code reads or
+    # assigns ``_queue`` or ``_eid``, the environment switches for good to
+    # upstream's representation: a heapq list of (time, priority, eid, event)
+    # tuples (_pyqueue) and an itertools.count (_pyeid).
+
+    def __cinit__(self, *args, **kwargs):
+        self._heap = simpy_heap_new()
+
     def __init__(self, initial_time: SimTime = 0):
         self._now = initial_time
-        self._queue: List[
-            Tuple[SimTime, EventPriority, int, Event]
-        ] = []  # The list of all currently scheduled events.
-        self._eid = count()  # Counter for event IDs
+        # The list of all currently scheduled events.
+        self._heap = simpy_heap_new()
+        self._pyqueue = None
+        self._pyeid = None
+        self._compat = False
+        self._next_eid = 0  # Counter for event IDs
         self._active_proc: Optional[Process] = None
 
         # Bind all BoundClass instances to "self" to improve performance.
@@ -120,6 +157,28 @@ cdef class Environment:
     def active_process(self) -> Optional[Process]:
         """The currently active process of the environment."""
         return self._active_proc
+
+    @property
+    def _queue(self):
+        # The list of all currently scheduled events, as upstream keeps it.
+        self._to_compat()
+        return self._pyqueue
+
+    @_queue.setter
+    def _queue(self, value):
+        self._to_compat()
+        self._pyqueue = value
+
+    @property
+    def _eid(self):
+        # Counter for event IDs, as upstream keeps it.
+        self._to_compat()
+        return self._pyeid
+
+    @_eid.setter
+    def _eid(self, value):
+        self._to_compat()
+        self._pyeid = value
 
     if TYPE_CHECKING:
         # This block is only evaluated when type checking with, e.g. Mypy.
@@ -169,16 +228,19 @@ cdef class Environment:
         delay: SimTime = 0,
     ) -> None:
         """Schedule an *event* with a given *priority* and a *delay*."""
-        heappush(self._queue,
-                 (self._now + delay, priority, next(self._eid), event))
+        self._push(self._now + delay, priority, event)
 
     def peek(self) -> SimTime:
         """Get the time of the next scheduled event. Return
         :data:`~simpy.core.Infinity` if there is no further event."""
-        try:
-            return self._queue[0][0]
-        except IndexError:
+        if self._compat or self._heap is None:
+            try:
+                return self._queue[0][0]
+            except IndexError:
+                return Infinity
+        if simpy_heap_len(self._heap) == 0:
             return Infinity
+        return <object>simpy_heap_top_time(self._heap)
 
     def step(self) -> None:
         """Process the next event.
@@ -186,16 +248,88 @@ cdef class Environment:
         Raise an :exc:`EmptySchedule` if no further events are available.
 
         """
-        try:
-            self._now, _, _, event = heappop(self._queue)
-        except IndexError:
+        if self._step():
             raise EmptySchedule()
+
+    cdef int _to_compat(self) except -1:
+        if self._compat:
+            return 0
+        if self._heap is None:  # Cleared by the garbage collector.
+            self._pyqueue = []
+        else:
+            self._pyqueue = simpy_heap_to_list(self._heap)
+        self._pyeid = count(self._next_eid)
+        self._heap = None
+        self._compat = True
+        return 0
+
+    cdef int _push(self, object at, object priority, object event) except -1:
+        # heappush(self._queue, (at, priority, next(self._eid), event))
+        cdef double t
+        cdef long long prio
+        if not self._compat:
+            if (self._heap is not None and simpy_time_key(at, &t)
+                    and simpy_prio_key(priority, &prio)):
+                simpy_heap_push(self._heap, t, prio, self._next_eid, at, event)
+                self._next_eid += 1
+                return 0
+            self._to_compat()
+        heappush(self._pyqueue, (at, priority, next(self._pyeid), event))
+        return 0
+
+    cdef int _schedule(self, object event, object priority, object delay,
+                       int nargs) except -1:
+        # self.schedule(event[, priority[, delay]]) with *nargs* arguments, as
+        # the event classes call it. An overriding or patched schedule() is
+        # called exactly that way; otherwise the event is pushed directly.
+        if not simpy_plain(self, <PyTypeObject *>Environment, _S_SCHEDULE,
+                           _SCHEDULE):
+            if nargs == 1:
+                self.schedule(event)
+            elif nargs == 2:
+                self.schedule(event, priority)
+            else:
+                self.schedule(event, priority, delay)
+            return 0
+        if delay is _ZERO:
+            at = simpy_add_zero(self._now, _ZERO)
+        else:
+            at = self._now + delay
+        return self._push(at, priority, event)
+
+    cdef int _step(self) except -1:
+        # Pop and process the next event. Return 1 if there is none.
+        cdef SimpyQEntry entry
+        cdef Event ev
+        cdef list callbacks
+        if self._compat or self._heap is None:
+            try:
+                self._now, _, _, event = heappop(self._queue)
+            except IndexError:
+                return 1
+        else:
+            if simpy_heap_len(self._heap) == 0:
+                return 1
+            simpy_heap_pop(self._heap, &entry)
+            self._now = <object>entry.time
+            Py_DECREF(<object>entry.time)
+            event = <object>entry.event
+            Py_DECREF(<object>entry.event)
 
         # Process callbacks of the event. Set the events callbacks to None
         # immediately to prevent concurrent modifications.
-        callbacks, event.callbacks = event.callbacks, None  # type: ignore
-        for callback in callbacks:
-            callback(event)
+        if isinstance(event, Event):
+            ev = <Event>event
+            callbacks = ev.callbacks
+            ev.callbacks = None
+            for callback in callbacks:
+                callback(ev)
+            if ev._ok or hasattr(ev, '_defused'):
+                return 0
+        else:
+            callbacks, event.callbacks = event.callbacks, None
+            for callback in callbacks:
+                callback(event)
 
         if not event._ok and not hasattr(event, '_defused'):
             # The event has failed and has not been defused. Crash the
@@ -204,25 +338,7 @@ cdef class Environment:
             exc = type(event._value)(*event._value.args)
             exc.__cause__ = event._value
             raise exc
-
-    cpdef _run_inline(self):
-        cdef list queue
-        cdef Event event
-        """Same as calling :meth:`step()` forever, without the per-event
-        method call."""
-        queue = self._queue
-        while queue:
-            self._now, _, _, event = heappop(queue)
-
-            callbacks, event.callbacks = event.callbacks, None  # type: ignore
-            for callback in callbacks:
-                callback(event)
-
-            if not event._ok and not hasattr(event, '_defused'):
-                exc = type(event._value)(*event._value.args)
-                exc.__cause__ = event._value
-                raise exc
-        raise EmptySchedule()
+        return 0
 
     def run(
         self, until: Optional[Union[SimTime, Event]] = None
@@ -270,7 +386,11 @@ cdef class Environment:
 
         try:
             if type(self).step is Environment.step and 'step' not in vars(self):
-                self._run_inline()
+                # Same as calling step() forever, without the per-event
+                # method call.
+                while not self._step():
+                    pass
+                raise EmptySchedule()
             else:
                 # step() is overridden or patched (e.g. for tracing): honor it.
                 while True:
@@ -285,3 +405,8 @@ cdef class Environment:
                     f'triggered: {until}'
                 )
         return None
+
+
+cdef object _SCHEDULE = Environment.__dict__['schedule']
+cdef object _S_SCHEDULE = 'schedule'
+cdef object _ZERO = 0

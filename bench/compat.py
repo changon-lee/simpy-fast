@@ -119,6 +119,155 @@ def release_foreign():
     return rel.triggered, r1.count, r2.count
 
 
+def mixed_model(env, log):
+    """A small model with timeouts, processes, resources and conditions whose
+    trace depends on the exact event order."""
+    res = simpy.Resource(env, capacity=1)
+    store = simpy.Store(env, capacity=2)
+
+    def worker(i, delays):
+        for d in delays:
+            with res.request() as req:
+                yield req
+                yield env.timeout(d)
+            yield store.put((i, env.now))
+            got = yield env.timeout(1, 'a') | env.timeout(1, 'b')
+            log.append((i, env.now, sorted(got.values())))
+
+    def consumer():
+        while True:
+            item = yield store.get()
+            log.append(('c', env.now, item))
+
+    env.process(consumer())
+    for i, delays in enumerate([[1, 2.5, 0], [0, 0, 3], [2, 0.5, 1]]):
+        env.process(worker(i, delays))
+
+
+def schedule_override():
+    calls = []
+
+    class Env(simpy.Environment):
+        def schedule(self, event, *args):
+            calls.append((type(event).__name__, args))
+            super().schedule(event, *args)
+
+    env = Env()
+    log = []
+    mixed_model(env, log)
+    env.run(until=20)
+    return log, calls
+
+
+def schedule_patched():
+    env = simpy.Environment()
+    calls = []
+    orig = env.schedule
+
+    def schedule(event, *args):
+        calls.append((type(event).__name__, args))
+        orig(event, *args)
+
+    env.schedule = schedule
+    log = []
+    mixed_model(env, log)
+    env.run(until=20)
+    return log, calls
+
+
+def queue_view(env):
+    return [(t, p, e, type(ev).__name__) for t, p, e, ev in env._queue]
+
+
+def queue_access_midrun(at):
+    env = simpy.Environment()
+    log = []
+    mixed_model(env, log)
+    env.run(until=at)
+    view = queue_view(env)
+    env.run(until=20)
+    return view, log, env.peek()
+
+
+def monitored_step():
+    # The step-patching recipe of SimPy's monitoring guide; it reads _queue.
+    from functools import wraps
+    env = simpy.Environment()
+    seen = []
+    step = env.step
+
+    @wraps(step)
+    def tracing_step():
+        if len(env._queue):
+            t, prio, eid, event = env._queue[0]
+            seen.append((t, prio, eid, type(event).__name__))
+        return step()
+
+    env.step = tracing_step
+    log = []
+    mixed_model(env, log)
+    env.run(until=20)
+    return seen, log
+
+
+def eid_access():
+    env = simpy.Environment()
+    log = []
+    mixed_model(env, log)
+    env.run(until=3)
+    first = next(env._eid)
+    env.run(until=20)
+    return first, log, queue_view(env)
+
+
+def time_keys(initial, delays):
+    env = simpy.Environment(initial)
+    out = []
+
+    def p(i, d):
+        yield env.timeout(d)
+        out.append((i, repr(env.now), type(env.now).__name__))
+        yield env.timeout(0)
+        out.append((i, repr(env.now)))
+
+    for i, d in enumerate(delays):
+        env.process(p(i, d))
+    peeks = []
+    while env.peek() != simpy.core.Infinity:
+        peeks.append(repr(env.peek()))
+        env.step()
+    return out, peeks
+
+
+def schedule_priorities(prios):
+    env = simpy.Environment()
+    order = []
+    for i, prio in enumerate(prios):
+        ev = env.event()
+        ev._ok = True
+        ev._value = i
+        ev.callbacks.append(lambda e: order.append(e._value))
+        env.schedule(ev, prio, (i % 2) * 0.5)
+    env.run()
+    return order
+
+
+probe('schedule override', schedule_override)
+probe('schedule patched', schedule_patched)
+probe('queue access at 0', lambda: queue_access_midrun(0.5))
+probe('queue access at 7', lambda: queue_access_midrun(7))
+probe('monitored step', monitored_step)
+probe('eid access', eid_access)
+probe('time int/float', lambda: time_keys(0, [3, 1.5, 3.0, 2, 0, 1e-9]))
+probe('time -0.0', lambda: time_keys(-0.0, [0, 0.0, 1]))
+probe('time big int', lambda: time_keys(2 ** 60, [1, 2, 2 ** 54]))
+probe('time float initial', lambda: time_keys(0.5, [1, 2]))
+probe('time nan', lambda: time_keys(0, [float('nan'), 1, 2]))
+probe('time inf', lambda: time_keys(0, [float('inf'), 1]))
+probe('time Fraction mix', lambda: time_keys(0, [Fraction(1, 3), 1, 0.25]))
+probe('priority schedule ints', lambda: schedule_priorities([3, -1, 0, 1, 1, 2]))
+probe('priority schedule float', lambda: schedule_priorities([1, 0.5, 0, 1.5]))
+probe('priority schedule big', lambda: schedule_priorities([2 ** 70, 1, -2 ** 70]))
 probe('priority int', lambda: priority_order([3, 1, 2, 1]))
 probe('priority float', lambda: priority_order([1.5, 1.2, 1.7, 1.2]))
 probe('priority bool', lambda: priority_order([True, False, True]))

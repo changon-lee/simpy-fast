@@ -11,7 +11,8 @@ from setuptools import Extension, find_packages, setup
 from cython_config import DIRECTIVES, MODULES
 
 exts = [
-    Extension(m, [os.path.join('src', *m.split('.')) + '.pyx'])
+    Extension(m, [os.path.join('src', *m.split('.')) + '.pyx'],
+              include_dirs=[os.path.join('src', 'simpy')])
     for m in MODULES
 ]
 
