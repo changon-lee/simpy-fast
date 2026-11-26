@@ -1,6 +1,6 @@
 """Native sampling profiler for Windows x64 (ctypes + dbghelp), no admin rights.
 
-Usage: python bench/winprof.py [--ms 1] [--top 40] OUT.json -- PYTHON TARGET.py ARGS...
+Usage: python bench/winprof.py [--ms 1] [--top 40] [--lines] OUT.json -- PYTHON TARGET.py ARGS...
 
 TARGET.py must print READY after its imports, wait for a line on stdin, run the
 work, print DONE and wait for another line (see bench/winprof_target.py). The
@@ -10,6 +10,10 @@ walks its native stack with StackWalk64 and resolves symbols with dbghelp
 function, plus an ownership split: each sample is charged to the innermost
 frame that is either SimPy library code or the CPython bytecode interpreter
 (Python code such as the model's generators).
+
+--lines also charges each sample to a source line of SimPy's C code: the
+line of the innermost SimPy frame (for a call into CPython, the line of that
+call), printed with the .pyx line the C code was generated from.
 """
 import collections
 import ctypes as C
@@ -42,6 +46,9 @@ dbg.SymInitializeW.restype = W.BOOL
 dbg.SymSetOptions.argtypes = [W.DWORD]
 dbg.SymFromAddr.argtypes = [W.HANDLE, C.c_uint64, C.POINTER(C.c_uint64), C.c_void_p]
 dbg.SymFromAddr.restype = W.BOOL
+dbg.SymGetLineFromAddrW64.argtypes = [W.HANDLE, C.c_uint64,
+                                      C.POINTER(W.DWORD), C.c_void_p]
+dbg.SymGetLineFromAddrW64.restype = W.BOOL
 dbg.SymGetModuleBase64.argtypes = [W.HANDLE, C.c_uint64]
 dbg.SymGetModuleBase64.restype = C.c_uint64
 dbg.StackWalk64.argtypes = [W.DWORD, W.HANDLE, W.HANDLE, C.c_void_p, C.c_void_p,
@@ -101,8 +108,12 @@ def module_names(hproc):
 
 def main():
     argv = sys.argv[1:]
-    ms, top = 1.0, 40
+    ms, top, lines = 1.0, 40, False
     while argv[0].startswith('--'):
+        if argv[0] == '--lines':
+            lines = True
+            argv = argv[1:]
+            continue
         if argv[0] == '--ms':
             ms = float(argv[1])
         elif argv[0] == '--top':
@@ -117,7 +128,7 @@ def main():
     hproc = k32.OpenProcess(0x0400 | 0x0010, False, proc.pid)
     hthr = k32.OpenThread(0x0002 | 0x0008 | 0x0040, False,
                           main_thread_id(proc.pid))
-    dbg.SymSetOptions(0x2 | 0x4 | 0x200 | 0x80000)
+    dbg.SymSetOptions(0x2 | 0x4 | 0x10 | 0x200 | 0x80000)
     # The PDBs sit next to their DLL/PYD; dbghelp does not search there by
     # default, so the module folders form the symbol path.
     mods, dirs = module_names(hproc)
@@ -186,6 +197,34 @@ def main():
         return n
 
     stacks = [[name(pc) for pc in s] for s in samples]
+    line_of = {}
+
+    def source_line(pc):
+        key = line_of.get(pc)
+        if key is None:
+            info = C.create_string_buffer(40)
+            C.c_uint32.from_address(C.addressof(info)).value = 40
+            disp = W.DWORD()
+            if dbg.SymGetLineFromAddrW64(hproc, pc, C.byref(disp), info):
+                lineno = C.c_uint32.from_address(C.addressof(info) + 16).value
+                fname = C.wstring_at(C.c_uint64.from_address(
+                    C.addressof(info) + 24).value)
+                key = (fname, lineno)
+            else:
+                key = ('?', 0)
+            line_of[pc] = key
+        return key
+
+    sample_lines = []
+    if lines:
+        for pcs, s in zip(samples, stacks):
+            for i, f in enumerate(s):
+                if f.startswith(SIMPY_MODS):
+                    # Frames above the leaf hold return addresses.
+                    sample_lines.append(source_line(pcs[i] - (i > 0)))
+                    break
+            else:
+                sample_lines.append(None)
     proc.stdin.write('bye\n')
     proc.stdin.flush()
     proc.wait()
@@ -200,8 +239,7 @@ def main():
     for s in stacks:
         owner = 'other'
         for f in s:
-            if f.startswith(('core!', 'events!', 'base!', 'resource!', 'store!',
-                             'container!')):
+            if f.startswith(SIMPY_MODS):
                 owner = 'simpy-lib'
                 break
             if f.endswith('!_PyEval_EvalFrameDefault'):
@@ -218,8 +256,42 @@ def main():
     print(f'\n== inclusive (top {top}) ==')
     for k, v in incl_c.most_common(top):
         print(f'{100 * v / n:6.1f}%  {k}')
+    if lines:
+        print(f'\n== source lines of SimPy C code (top {top}) ==')
+        line_c = collections.Counter(k for k in sample_lines if k)
+        for (fname, lineno), v in line_c.most_common(top):
+            print(f'{100 * v / n:6.1f}%  {os.path.basename(fname)}:{lineno}'
+                  f'  {pyx_ref(fname, lineno)}')
     with open(out_path, 'w') as f:
-        json.dump({'wall': wall, 'stacks': stacks}, f)
+        json.dump({'wall': wall, 'stacks': stacks,
+                   'lines': [list(k) if k else None for k in sample_lines]}, f)
+
+
+_c_cache = {}
+
+
+def pyx_ref(fname, lineno):
+    """The C line and the .pyx line Cython generated it from (the nearest
+    preceding '/* "file.pyx":N' comment)."""
+    text = _c_cache.get(fname)
+    if text is None:
+        try:
+            with open(fname, encoding='utf-8', errors='replace') as f:
+                text = f.read().splitlines()
+        except OSError:
+            text = []
+        _c_cache[fname] = text
+    if not 0 < lineno <= len(text):
+        return ''
+    code = text[lineno - 1].strip()[:70]
+    for i in range(lineno - 1, max(lineno - 400, 0), -1):
+        t = text[i - 1].strip()
+        if t.startswith('/* "') and '.pyx":' in t:
+            return f'[{t[3:].split(" ")[0].strip(chr(34))}] {code}'
+    return code
+
+
+SIMPY_MODS = ('core!', 'events!', 'base!', 'resource!', 'store!', 'container!')
 
 
 if __name__ == '__main__':

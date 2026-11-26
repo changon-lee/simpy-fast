@@ -25,7 +25,7 @@ DIRECTIVES = {
     'profile': os.environ.get('CY_PROFILE') == '1',
 }
 
-# The build patches two spots of the C that Cython generates. Each patch is
+# The build patches three spots of the C that Cython generates. Each patch is
 # count-checked, so a Cython version that generates different code fails the
 # build instead of silently losing the patch.
 #
@@ -53,6 +53,16 @@ _CHEAP_DISPATCH = (rb'if (unlikely(__pyx_skip_dispatch) || simpy_cpdef_plain('
                    rb'(PyObject *)__pyx_v_self, \2, (void(*)(void)) \3, '
                    rb'__pyx_mstate_global->__pyx_CyFunctionType)) ;\1')
 _CHEAP_MARK = b'|| simpy_cpdef_plain('
+
+# 3. Cython's __dict__ attribute has a getter only, so `obj.__dict__ = d` and
+#    `del obj.__dict__` raise AttributeError. Instances of Python classes, as
+#    upstream's events, environments and resources are, accept both;
+#    simpy_set_dict() (_cfast.h) is their setter.
+_DICT_GETSET = re.compile(
+    rb'\{"__dict__", (__pyx___dict__getter_\w+), 0, 0, 0\}')
+_DICT_GETSET_NEW = rb'{"__dict__", \1, simpy_set_dict, 0, 0}'
+_DICT_GETTER = re.compile(rb'^static PyObject \*__pyx___dict__getter_\w+\(',
+                          re.M)
 _CPDEF = re.compile(r'^\s*cpdef\s+\w+\s*\(', re.M)
 
 
@@ -75,6 +85,11 @@ def patch_generated_c(ext_modules, pkg_root):
                 code = f.read()
             new = _DISPATCH.sub(_CHEAP_DISPATCH, code)
             new = new.replace(_EAGER_DICT, _LAZY_DICT)
+            new, setters = _DICT_GETSET.subn(_DICT_GETSET_NEW, new)
+            getters = len(_DICT_GETTER.findall(new))
+            if setters != getters:
+                raise RuntimeError(f'{src}: patched {setters} __dict__ '
+                                   f'setters, expected {getters}')
             if new != code:
                 with open(src, 'wb') as f:
                     f.write(new)

@@ -46,6 +46,33 @@ static inline int simpy_plain(PyObject *obj, PyTypeObject *base,
     return 1;
 }
 
+/* Setter of the __dict__ attribute (the build adds it, see cython_config.py):
+ * `obj.__dict__ = value` and `del obj.__dict__` as for instances of Python
+ * classes (subtype_setdict() in Objects/typeobject.c). A deleted dict is
+ * created again, empty, on first use. */
+static int simpy_set_dict(PyObject *obj, PyObject *value, void *context)
+{
+    Py_ssize_t off = Py_TYPE(obj)->tp_dictoffset;
+    PyObject **dictptr;
+
+    (void)context;
+    if (value != NULL && !PyDict_Check(value)) {
+        PyErr_Format(PyExc_TypeError,
+                     "__dict__ must be set to a dictionary, not a '%.200s'",
+                     Py_TYPE(value)->tp_name);
+        return -1;
+    }
+    if (off <= 0) {
+        PyErr_SetString(PyExc_AttributeError,
+                        "This object has no __dict__");
+        return -1;
+    }
+    dictptr = (PyObject **)((char *)obj + off);
+    Py_XINCREF(value);
+    Py_XSETREF(*dictptr, value);
+    return 0;
+}
+
 /* 1 when `obj.<name>` is the data descriptor `descr` (a property or C field
  * of the extension type `base`): obj is an instance of base or of a subclass
  * that overrides neither <name> nor attribute access. A data descriptor takes

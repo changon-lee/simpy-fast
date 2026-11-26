@@ -1465,6 +1465,66 @@ def mro_super_chains():
 
 
 probe('mro super chains', mro_super_chains)
+
+
+def dict_assignment():
+    # obj.__dict__ = d and del obj.__dict__ on every built-in object type.
+    env = simpy.Environment()
+    res = simpy.Resource(env, 1)
+    pres = simpy.PriorityResource(env, 1)
+    st = simpy.Store(env)
+    fst = simpy.FilterStore(env)
+    con = simpy.Container(env, 10)
+
+    def gen():
+        yield env.timeout(1)
+
+    class D(dict):
+        pass
+
+    makers = [
+        ('Environment', simpy.Environment),
+        ('Event', env.event),
+        ('Timeout', lambda: env.timeout(1)),
+        ('Process', lambda: env.process(gen())),
+        ('Condition', lambda: env.timeout(1) | env.timeout(2)),
+        ('AllOf', lambda: env.all_of([env.timeout(1)])),
+        ('Resource', lambda: simpy.Resource(env, 1)),
+        ('Request', res.request),
+        ('Release', lambda: res.release(res.request())),
+        ('PriorityRequest', lambda: pres.request(priority=1)),
+        ('Store', lambda: simpy.Store(env)),
+        ('StorePut', lambda: st.put(1)),
+        ('StoreGet', st.get),
+        ('FilterStoreGet', lambda: fst.get(lambda x: True)),
+        ('Container', lambda: simpy.Container(env, 10)),
+        ('ContainerPut', lambda: con.put(1)),
+        ('ContainerGet', lambda: con.get(1)),
+    ]
+    out = []
+    for name, make in makers:
+        o = make()
+        row = [name]
+        o.__dict__ = {'zz': 1}
+        row.append((o.zz, list(vars(o))))
+        o.__dict__ = D(yy=2)
+        row.append((o.yy, type(vars(o)).__name__, hasattr(o, 'zz')))
+        for bad in (5, None, [('a', 1)]):
+            try:
+                o.__dict__ = bad
+                row.append('accepted')
+            except TypeError as e:
+                row.append(str(e))
+        row.append(o.yy)
+        del o.__dict__
+        row.append(getattr(o, 'yy', 'gone'))
+        o.ww = 3
+        row.append((o.ww, dict(vars(o))))
+        out.append(row)
+    return out
+
+
+probe('dict assignment', dict_assignment)
 if np is not None:
     probe('priority numpy int64', lambda: priority_order(list(np.array([3, 1, 2], dtype=np.int64))))
     probe('priority numpy float', lambda: priority_order(list(np.array([1.5, 1.2], dtype=np.float64))))
