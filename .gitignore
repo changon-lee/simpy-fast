@@ -7,3 +7,5 @@ build/
 *.c
 .pytest_cache/
 build.log
+dist/
+*.egg-info/

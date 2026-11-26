@@ -8,7 +8,13 @@ The following tables list all the available components in this module.
 {toc}
 
 """
-from pkg_resources import get_distribution
+try:
+    from importlib.metadata import version as _dist_version
+except ImportError:  # Python < 3.8
+    from pkg_resources import get_distribution
+
+    def _dist_version(name: str) -> str:
+        return get_distribution(name).version
 from pkgutil import extend_path
 from typing import Tuple, Type
 
@@ -82,4 +88,4 @@ if __doc__:
     assert set(__all__) == {obj.__name__ for _, objs in _toc for obj in objs}
 
 __path__ = list(extend_path(__path__, __name__))
-__version__: str = get_distribution('simpy').version
+__version__: str = _dist_version('simpy')
