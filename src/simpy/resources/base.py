@@ -41,9 +41,12 @@ class Put(Event, ContextManager['Put'], Generic[ResourceType]):
     """
 
     def __init__(self, resource: ResourceType):
-        # NOTE: Event.__init__() is inlined for performance reasons.
-        self.env = env = resource._env
-        self.callbacks = [resource._trigger_get]
+        # NOTE: Event.__init__() is inlined for performance reasons. The
+        # typed locals give Cython direct field access.
+        ev: Event = self
+        env: Environment = resource._env
+        ev.env = env
+        ev.callbacks = [resource._trigger_get]
         self.resource = resource
         self.proc: Optional[Process] = env._active_proc
 
@@ -93,9 +96,12 @@ class Get(Event, ContextManager['Get'], Generic[ResourceType]):
     """
 
     def __init__(self, resource: ResourceType):
-        # NOTE: Event.__init__() is inlined for performance reasons.
-        self.env = env = resource._env
-        self.callbacks = [resource._trigger_put]
+        # NOTE: Event.__init__() is inlined for performance reasons. The
+        # typed locals give Cython direct field access.
+        ev: Event = self
+        env: Environment = resource._env
+        ev.env = env
+        ev.callbacks = [resource._trigger_put]
         self.resource = resource
         self.proc = env._active_proc
 
@@ -226,6 +232,7 @@ class BaseResource(Generic[PutType, GetType]):
         # required).
         put_queue = self.put_queue
         do_put = self._do_put
+        put_event: Event
         idx = 0
         while idx < len(put_queue):
             put_event = put_queue[idx]
@@ -268,6 +275,7 @@ class BaseResource(Generic[PutType, GetType]):
         # required).
         get_queue = self.get_queue
         do_get = self._do_get
+        get_event: Event
         idx = 0
         while idx < len(get_queue):
             get_event = get_queue[idx]

@@ -42,6 +42,8 @@ ext_modules = cythonize(
     compiler_directives={
         'binding': True,
         'embedsignature': True,
+        # CY_PROFILE=1 builds a cProfile-visible variant for diagnosis only.
+        'profile': os.environ.get('CY_PROFILE') == '1',
     },
 )
 dist = Distribution({'ext_modules': ext_modules})

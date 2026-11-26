@@ -80,8 +80,10 @@ class Event:
     # triggered) and ``_defused`` (only present once defused). When compiled
     # with Cython, ``events.pxd`` declares them as fields of an extension type.
 
-    def __cinit__(self, *args: Any, **kwargs: Any) -> None:
-        # Only runs when compiled: default for subclasses that skip __init__.
+    def __cinit__(self) -> None:
+        # Only runs when compiled (Cython passes no constructor arguments to a
+        # __cinit__ that takes none): default for subclasses that skip
+        # __init__.
         self._value = PENDING
 
     def __init__(self, env: 'Environment'):
@@ -440,18 +442,22 @@ class Process(Event):
                 break
 
             # Process returned another event to wait upon.
-            try:
-                # Be optimistic and blindly access the callbacks attribute.
-                callbacks = next_event.callbacks
-            except AttributeError:
-                # Our optimism didn't work out, figure out what went wrong and
-                # inform the user.
-                msg = f'Invalid yield value "{next_event}"'
-                descr = _describe_frame(self._generator.gi_frame)
-                error = RuntimeError(f'\n{descr}{msg}')
-                # Drop the AttributeError as the cause for this exception.
-                error.__cause__ = None
-                raise error
+            if isinstance(next_event, Event):
+                event = next_event
+                callbacks = event.callbacks
+            else:
+                try:
+                    # Be optimistic and blindly access the callbacks attribute.
+                    callbacks = next_event.callbacks
+                except AttributeError:
+                    # Our optimism didn't work out, figure out what went wrong
+                    # and inform the user.
+                    msg = f'Invalid yield value "{next_event}"'
+                    descr = _describe_frame(self._generator.gi_frame)
+                    error = RuntimeError(f'\n{descr}{msg}')
+                    # Drop the AttributeError as the cause for this exception.
+                    error.__cause__ = None
+                    raise error
             if callbacks is not None:
                 # The event has not yet been triggered. Register callback
                 # to resume the process if that happens.
