@@ -23,6 +23,10 @@ static inline int simpy_plain(PyObject *obj, PyTypeObject *base,
             return 0;
         if (_PyType_Lookup(tp, name) != func)
             return 0;
+#ifdef Py_TPFLAGS_MANAGED_DICT
+        if (tp->tp_flags & Py_TPFLAGS_MANAGED_DICT)
+            return 0;
+#endif
     }
     off = tp->tp_dictoffset;
     if (off == 0)
@@ -55,6 +59,27 @@ static inline PyObject *simpy_add_zero(PyObject *now, PyObject *zero)
         return now;
     }
     return PyNumber_Add(now, zero);
+}
+
+/* gen.send(arg) for Process._resume, as a new reference. *returned is set to
+ * 1 when the generator returned (the result is its return value, which
+ * upstream reads from StopIteration.args), else 0. NULL with an exception
+ * set when the call raised. Exact generators go through am_send, which is
+ * what gen.send() runs, minus raising and catching StopIteration on return;
+ * any other object gets a plain .send() call. */
+static inline PyObject *simpy_send(PyObject *gen, PyObject *arg,
+                                   PyObject *send_name, int *returned)
+{
+#if PY_VERSION_HEX >= 0x030A0000
+    if (PyGen_CheckExact(gen)) {
+        PyObject *res = NULL;
+        PySendResult r = PyIter_Send(gen, arg, &res);
+        *returned = (r == PYGEN_RETURN);
+        return r == PYGEN_ERROR ? NULL : res;
+    }
+#endif
+    *returned = 0;
+    return PyObject_CallMethodOneArg(gen, send_name, arg);
 }
 
 #endif /* SIMPY_CFAST_H */

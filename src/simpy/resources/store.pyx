@@ -19,10 +19,14 @@ from typing import (
     Union,
 )
 
+cimport cython
+
+from simpy.events cimport register_state_fields
 from simpy.core import BoundClass, Environment
 from simpy.resources import base
 
 
+@cython.auto_pickle(False)
 cdef class StorePut(base.Put):
     """Request to put *item* into the *store*. The request is triggered once
     there is space for the item in the store.
@@ -35,6 +39,7 @@ cdef class StorePut(base.Put):
         super().__init__(store)
 
 
+@cython.auto_pickle(False)
 cdef class StoreGet(base.Get):
     """Request to get an *item* from the *store*. The request is triggered
     once there is an item available in the store.
@@ -42,6 +47,7 @@ cdef class StoreGet(base.Get):
     """
 
 
+@cython.auto_pickle(False)
 cdef class FilterStoreGet(StoreGet):
     """Request to get an *item* from the *store* matching the *filter*. The
     request is triggered once there is such an item available in the store.
@@ -207,3 +213,7 @@ cdef class FilterStore(Store):
                 event.succeed(item)
                 break
         return True
+
+
+register_state_fields(StorePut, ('item',))
+register_state_fields(FilterStoreGet, ('filter',))

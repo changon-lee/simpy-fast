@@ -18,12 +18,16 @@ from typing import (
     Union,
 )
 
+cimport cython
+
+from simpy.events cimport register_state_fields
 from simpy.core import BoundClass, Environment
 from simpy.events import PENDING, Event, Process
 
 ResourceType = TypeVar('ResourceType', bound='BaseResource')
 
 
+@cython.auto_pickle(False)
 cdef class Put(Event):
     """Generic event for requesting to put something into the *resource*.
 
@@ -85,6 +89,7 @@ cdef class Put(Event):
             self.resource.put_queue.remove(self)
 
 
+@cython.auto_pickle(False)
 cdef class Get(Event):
     """Generic event for requesting to get something from the *resource*.
 
@@ -304,3 +309,7 @@ cdef class BaseResource:
 
             if not proceed:
                 break
+
+
+register_state_fields(Put, ('resource', 'proc'))
+register_state_fields(Get, ('resource', 'proc'))

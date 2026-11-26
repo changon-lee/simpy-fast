@@ -6,6 +6,9 @@ cimport cython
 from cpython.object cimport PyObject, PyTypeObject
 from cpython.ref cimport Py_DECREF
 
+from simpy.events cimport run_callbacks
+
+import copyreg
 from heapq import heappush, heappop
 from itertools import count
 from types import MethodType
@@ -114,6 +117,7 @@ class StopSimulation(Exception):
 SimTime = Union[int, float]
 
 
+@cython.auto_pickle(False)
 cdef class Environment:
     """Execution environment for an event-based simulation. The passing of time
     is simulated by stepping from event to event.
@@ -132,9 +136,6 @@ cdef class Environment:
     # upstream's representation: a heapq list of (time, priority, eid, event)
     # tuples (_pyqueue) and an itertools.count (_pyeid).
 
-    def __cinit__(self, *args, **kwargs):
-        self._heap = simpy_heap_new()
-
     def __init__(self, initial_time: SimTime = 0):
         self._now = initial_time
         # The list of all currently scheduled events.
@@ -147,6 +148,27 @@ cdef class Environment:
 
         # Bind all BoundClass instances to "self" to improve performance.
         BoundClass.bind_early(self)
+
+    # Copying and pickling see what they see of upstream's Environment: a
+    # plain Python object whose instance dict holds all of its state.
+
+    def __getstate__(self):
+        state = {'_now': self._now, '_queue': self._queue, '_eid': self._eid,
+                 '_active_proc': self._active_proc}
+        state.update(vars(self))
+        return state
+
+    def __setstate__(self, state):
+        for key, value in state.items():
+            if key in ('_now', '_queue', '_eid', '_active_proc'):
+                setattr(self, key, value)
+            else:
+                vars(self)[key] = value
+
+    def __reduce_ex__(self, protocol):
+        if protocol >= 2 or type(self).__reduce__ is not object.__reduce__:
+            return object.__reduce_ex__(self, protocol)
+        return copyreg.__newobj__, (type(self),), self.__getstate__()
 
     @property
     def now(self) -> SimTime:
@@ -249,7 +271,7 @@ cdef class Environment:
 
         """
         if self._step():
-            raise EmptySchedule()
+            _raise_empty()
 
     cdef int _to_compat(self) except -1:
         if self._compat:
@@ -322,14 +344,19 @@ cdef class Environment:
             ev = <Event>event
             callbacks = ev.callbacks
             ev.callbacks = None
-            for callback in callbacks:
-                callback(ev)
+            run_callbacks(ev, callbacks)
             if ev._ok or hasattr(ev, '_defused'):
                 return 0
-        else:
-            callbacks, event.callbacks = event.callbacks, None
-            for callback in callbacks:
-                callback(event)
+            # The event has failed and has not been defused. Crash the
+            # environment.
+            # Create a copy of the failure exception with a new traceback.
+            exc = type(ev._value)(*ev._value.args)
+            exc.__cause__ = ev._value
+            raise exc
+
+        callbacks, event.callbacks = event.callbacks, None
+        for callback in callbacks:
+            callback(event)
 
         if not event._ok and not hasattr(event, '_defused'):
             # The event has failed and has not been defused. Crash the
@@ -385,15 +412,15 @@ cdef class Environment:
             until.callbacks.append(StopSimulation.callback)
 
         try:
-            if type(self).step is Environment.step and 'step' not in vars(self):
-                # Same as calling step() forever, without the per-event
-                # method call.
-                while not self._step():
-                    pass
-                raise EmptySchedule()
-            else:
-                # step() is overridden or patched (e.g. for tracing): honor it.
-                while True:
+            while True:
+                # self.step(); the plain method runs without the call. An
+                # overridden or patched step() (e.g. for tracing) is honored,
+                # also when installed during the run.
+                if simpy_plain(self, <PyTypeObject *>Environment, _S_STEP,
+                               _STEP):
+                    if self._step():
+                        _raise_empty()
+                else:
                     self.step()
         except StopSimulation as exc:
             return exc.args[0]  # == until.value
@@ -409,4 +436,15 @@ cdef class Environment:
 
 cdef object _SCHEDULE = Environment.__dict__['schedule']
 cdef object _S_SCHEDULE = 'schedule'
+cdef object _STEP = Environment.__dict__['step']
+cdef object _S_STEP = 'step'
 cdef object _ZERO = 0
+
+
+cdef int _raise_empty() except -1:
+    # What step() raises on an empty queue: EmptySchedule while handling
+    # the IndexError of heappop().
+    try:
+        raise IndexError('index out of range')
+    except IndexError:
+        raise EmptySchedule()

@@ -252,6 +252,326 @@ def schedule_priorities(prios):
     return order
 
 
+def process_returns():
+    env = simpy.Environment()
+
+    def gen(v):
+        yield env.timeout(1)
+        return v
+
+    def bare():
+        yield env.timeout(1)
+
+    def waiter(p):
+        got = yield p
+        return ('got', got)
+
+    values = (None, 0, (1, 2), (), [3], ValueError('x'), StopIteration(5))
+    procs = [env.process(gen(v)) for v in values]
+    procs.append(env.process(bare()))
+    procs.append(env.process(waiter(procs[2])))
+    env.run()
+    return [(type(p.value).__name__, repr(p.value), p.ok) for p in procs]
+
+
+def interrupts():
+    env = simpy.Environment()
+    log = []
+
+    def victim():
+        for _ in range(4):
+            try:
+                yield env.timeout(10)
+                log.append(('done', env.now))
+            except simpy.Interrupt as e:
+                log.append(('int', env.now, e.cause))
+
+    def attacker(p):
+        yield env.timeout(1)
+        p.interrupt('a')
+        yield env.timeout(1)
+        p.interrupt('b')
+        p.interrupt('c')
+
+    p = env.process(victim())
+    p.interrupt('early')
+    env.process(attacker(p))
+    env.run()
+    return log, p.value
+
+
+def resume_override():
+    env = simpy.Environment()
+    seen = []
+
+    class P(simpy.Process):
+        def _resume(self, event):
+            seen.append((env.now, type(event).__name__))
+            return super()._resume(event)
+
+    def g():
+        yield env.timeout(1)
+        yield env.timeout(2)
+        return 'r'
+
+    p = P(env, g())
+    env.run()
+    return seen, p.value
+
+
+def resume_patched():
+    env = simpy.Environment()
+    seen = []
+
+    def g():
+        yield env.timeout(1)
+        yield env.timeout(2)
+
+    p = env.process(g())
+    orig = p._resume
+
+    def patched(event):
+        seen.append(env.now)
+        orig(event)
+
+    p._resume = patched
+    env.run()
+    return seen, p.ok
+
+
+class FakeGen:
+    """Not a generator, but has send() and throw()."""
+
+    def __init__(self, env):
+        self.env = env
+        self.n = 0
+
+    def send(self, value):
+        self.n += 1
+        if self.n > 3:
+            raise StopIteration(('fin', value))
+        return self.env.timeout(1, self.n)
+
+    def throw(self, exc):
+        raise exc
+
+
+def fake_generator():
+    env = simpy.Environment()
+    p = env.process(FakeGen(env))
+    env.run()
+    return p.value, env.now
+
+
+def bad_yield():
+    env = simpy.Environment()
+
+    def g():
+        yield 42
+
+    env.process(g())
+    try:
+        env.run()
+    except RuntimeError as e:
+        return str(e).splitlines()[-1]
+
+
+def exc_chain(e):
+    out = []
+    while e is not None:
+        out.append((type(e).__name__, str(e).split(':')[0],
+                    e.__suppress_context__, type(e.__cause__).__name__))
+        e = e.__context__
+    return out
+
+
+def empty_step():
+    env = simpy.Environment()
+    try:
+        env.step()
+    except simpy.core.EmptySchedule as e:
+        return exc_chain(e)
+
+
+def run_until_untriggered():
+    env = simpy.Environment()
+    env.timeout(1)
+    try:
+        env.run(until=env.event())
+    except RuntimeError as e:
+        return exc_chain(e)
+
+
+def failed_event_crash():
+    env = simpy.Environment()
+    env.event().fail(KeyError('k'))
+    try:
+        env.run()
+    except KeyError as e:
+        return exc_chain(e)
+
+
+def step_patched_midrun():
+    env = simpy.Environment()
+    calls = []
+    log = []
+    mixed_model(env, log)
+    orig = env.step
+
+    def tracing():
+        calls.append(env.now)
+        orig()
+
+    def installer():
+        yield env.timeout(5)
+        env.step = tracing
+        yield env.timeout(5)
+        del env.step
+
+    env.process(installer())
+    env.run(until=15)
+    return calls, log
+
+
+def copy_env():
+    import copy
+    import pickle
+    out = []
+    for setup in ('fresh', 'events'):
+        env = simpy.Environment(1)
+        if setup == 'events':
+            env.timeout(2, 'x')
+            env.event().succeed(3)
+        for name, fn in (('copy', copy.copy), ('deepcopy', copy.deepcopy),
+                         ('pickle', lambda e: pickle.loads(pickle.dumps(e)))):
+            try:
+                e2 = fn(env)
+                q = [(t, p, i, type(ev).__name__) for t, p, i, ev in e2._queue]
+                out.append((setup, name, type(e2).__name__, e2.now, q,
+                            e2._queue is env._queue, e2.process.__self__ is env))
+            except Exception as ex:  # noqa: BLE001
+                out.append((setup, name, type(ex).__name__))
+    return out
+
+
+def copy_objects():
+    import copy
+    env = simpy.Environment()
+    res = simpy.Resource(env, 1)
+    store = simpy.Store(env, 2)
+    cont = simpy.Container(env, 10, init=3)
+
+    def g():
+        yield env.timeout(1)
+
+    objs = {
+        'event': env.event(),
+        'event ok': env.event().succeed('v'),
+        'timeout': env.timeout(2, 'w'),
+        'process': env.process(g()),
+        'request': res.request(),
+        'resource': res,
+        'store put': store.put('i'),
+        'store': store,
+        'container get': cont.get(1),
+        'container': cont,
+        'condition': env.timeout(1) & env.timeout(2),
+    }
+    out = []
+    for name, obj in objs.items():
+        for how, fn in (('copy', copy.copy), ('deepcopy', copy.deepcopy)):
+            try:
+                c = fn(obj)
+            except Exception as ex:  # noqa: BLE001
+                out.append((name, how, type(ex).__name__))
+                continue
+            row = [name, how, type(c).__name__, c is obj]
+            for attr in ('_value', '_ok', 'callbacks', 'env', '_delay',
+                         'resource', 'item', 'amount', 'capacity', 'items',
+                         'users', 'queue', 'put_queue', 'get_queue', '_level',
+                         '_events', '_count', '_target', '_generator'):
+                try:
+                    v = getattr(c, attr)
+                except AttributeError:
+                    continue
+                o = getattr(obj, attr)
+                desc = repr(v) if isinstance(v, (int, float, str, bool,
+                                                 type(None))) else                     type(v).__name__
+                if isinstance(v, (list, tuple)):
+                    desc += f'[{len(v)}]'
+                row.append((attr, desc, v is o))
+            out.append(tuple(row))
+    return out
+
+
+def pending_ok():
+    env = simpy.Environment()
+    ev = env.event()
+    try:
+        ev.ok
+    except AttributeError as e:
+        return str(e), getattr(e, 'name', None), getattr(e, 'obj', None) is ev
+
+
+def subclass_skip_init():
+    env = simpy.Environment()
+
+    class MyEvent(simpy.Event):
+        def __init__(self, env):
+            self.env = env
+            self.callbacks = []
+
+    ev = MyEvent(env)
+    out = [ev.triggered]
+    ev.succeed(5)
+    env.run()
+    return out + [ev.processed, ev.value, ev.ok]
+
+
+def event_reinit():
+    env = simpy.Environment()
+    ev = env.event()
+    ev.succeed(1)
+    env.run()
+    ev.__init__(env)
+    return ev.triggered, ev.processed, ev.value, ev.callbacks
+
+
+def private_ok():
+    env = simpy.Environment()
+    ev = env.event()
+    out = [hasattr(ev, '_ok'), getattr(ev, '_ok', 'absent')]
+    try:
+        del ev._ok
+    except AttributeError as e:
+        out.append(str(e))
+    ev.succeed()
+    out += [hasattr(ev, '_ok'), ev._ok]
+    del ev._ok
+    out += [hasattr(ev, '_ok'), 'ok' in dir(ev)]
+    ev._ok = False
+    out.append(ev.ok)
+    req = simpy.Resource(env, 1).request()
+    out.append(req.usage_since)
+    return out
+
+
+probe('private ok', private_ok)
+probe('pending ok', pending_ok)
+probe('subclass skip init', subclass_skip_init)
+probe('event reinit', event_reinit)
+probe('copy objects', copy_objects)
+probe('process returns', process_returns)
+probe('interrupts', interrupts)
+probe('resume override', resume_override)
+probe('resume patched', resume_patched)
+probe('fake generator', fake_generator)
+probe('bad yield', bad_yield)
+probe('empty step', empty_step)
+probe('run until untriggered', run_until_untriggered)
+probe('failed event crash', failed_event_crash)
+probe('step patched midrun', step_patched_midrun)
+probe('copy env', copy_env)
 probe('schedule override', schedule_override)
 probe('schedule patched', schedule_patched)
 probe('queue access at 0', lambda: queue_access_midrun(0.5))

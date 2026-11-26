@@ -9,6 +9,9 @@ fuel tanks.
 """
 from typing import TYPE_CHECKING, Optional, Union
 
+cimport cython
+
+from simpy.events cimport register_state_fields
 from simpy.core import BoundClass, Environment
 from simpy.resources import base
 
@@ -16,6 +19,7 @@ from simpy.resources import base
 ContainerAmount = Union[int, float]
 
 
+@cython.auto_pickle(False)
 cdef class ContainerPut(base.Put):
     """Request to put *amount* of matter into the *container*. The request will
     be triggered once there is enough space in the *container* available.
@@ -33,6 +37,7 @@ cdef class ContainerPut(base.Put):
         super().__init__(container)
 
 
+@cython.auto_pickle(False)
 cdef class ContainerGet(base.Get):
     """Request to get *amount* of matter from the *container*. The request will
     be triggered once there is enough matter available in the *container*.
@@ -128,3 +133,7 @@ cdef class Container(base.BaseResource):
             return True
         else:
             return None
+
+
+register_state_fields(ContainerPut, ('amount',))
+register_state_fields(ContainerGet, ('amount',))

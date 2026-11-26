@@ -32,6 +32,9 @@ from operator import attrgetter
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, List, Optional, Type
 
+cimport cython
+
+from simpy.events cimport register_state_fields
 from simpy.core import BoundClass, Environment, SimTime
 from simpy.events import Process
 from simpy.resources import base
@@ -60,6 +63,7 @@ class Preempted:
         """The resource which was lost, i.e., caused the preemption."""
 
 
+@cython.auto_pickle(False)
 cdef class Request(base.Put):
     """Request usage of the *resource*. The event is triggered once access is
     granted. Subclass of :class:`simpy.resources.base.Put`.
@@ -91,13 +95,7 @@ cdef class Request(base.Put):
         return None
 
 
-try:
-    # Pure-Python default; a compiled Request declares the field (None).
-    Request.usage_since = None  # type: ignore
-except TypeError:
-    pass
-
-
+@cython.auto_pickle(False)
 cdef class Release(base.Get):
     """Releases the usage of *resource* granted by *request*. This event is
     triggered immediately. Subclass of :class:`simpy.resources.base.Get`.
@@ -110,6 +108,7 @@ cdef class Release(base.Get):
         super().__init__(resource)
 
 
+@cython.auto_pickle(False)
 cdef class PriorityRequest(Request):
     """Request the usage of *resource* with a given *priority*. If the
     *resource* supports preemption and *preempt* is ``True`` other usage
@@ -309,3 +308,8 @@ cdef class PreemptiveResource(PriorityResource):
 
         # Explicit base call: zero-argument super() is unavailable in cpdef.
         return PriorityResource._do_put(self, event)
+
+
+register_state_fields(Request, ('usage_since',))
+register_state_fields(Release, ('request',))
+register_state_fields(PriorityRequest, ('priority', 'preempt', 'time', 'key'))

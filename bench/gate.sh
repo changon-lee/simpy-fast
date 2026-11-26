@@ -6,6 +6,7 @@
 #     it must pass in one of three attempts. test_rt_slow_sim_default_behavior
 #     fails on upstream every time under Python 3.12, so it is left out.
 #  3. bench/compat.py boundary probes must print exactly what upstream prints.
+#  4. bench/leakcheck.py: no leaked references.
 here="$(cd "$(dirname "$0")/.." && pwd)"
 tree="$here/${TREE:-src}"
 py="${PY:-python}"
@@ -39,4 +40,10 @@ if [ "$base_out" != "$tree_out" ]; then
   echo "GATE: RED (compat probes differ from upstream)"; exit 1
 fi
 echo "compat: identical to upstream ($(echo "$tree_out" | wc -l) probes)"
+
+if ! "$py" "$here/bench/leakcheck.py" "$tree" >/dev/null 2>&1; then
+  "$py" "$here/bench/leakcheck.py" "$tree"
+  echo "GATE: RED (reference leak)"; exit 1
+fi
+echo "leakcheck: no leaked references"
 echo "GATE: GREEN"

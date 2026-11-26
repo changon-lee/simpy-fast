@@ -13,7 +13,19 @@ used, there are several specialized subclasses of it.
     ~simpy.events.AllOf
 
 """
-from types import FrameType
+cimport cython
+from cpython.list cimport PyList_GET_ITEM, PyList_GET_SIZE
+from cpython.method cimport (
+    PyMethod_Check,
+    PyMethod_GET_FUNCTION,
+    PyMethod_GET_SELF,
+)
+from cpython.object cimport PyObject, PyTypeObject
+from cpython.version cimport PY_VERSION_HEX
+
+import copyreg
+
+from types import FrameType, GeneratorType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -33,7 +45,69 @@ from simpy.exceptions import Interrupt
 if TYPE_CHECKING and TYPE_CHECKING != 'SPHINX':  # Avoid circular import
     from simpy.core import Environment, SimTime
 
+cdef extern from "_cfast.h":
+    bint simpy_plain(object obj, PyTypeObject *base, object name, object func)
+    object simpy_send(object gen, object arg, object send_name, int *returned)
+
+cdef extern from "Python.h":
+    object simpy_method_new "PyMethod_New"(object func, object self)
+    bint simpy_type_check "PyObject_TypeCheck"(object o, PyTypeObject *t)
+
 cdef object _ZERO = 0
+
+
+# Callbacks are called as ``callback(event)``. For a bound method of a
+# registered SimPy method (Process._resume, ...) that call ends up in the
+# method's C implementation; run_callbacks() calls the implementation
+# directly. A registration is (function in the type dict, owner type, impl).
+cdef struct _FastCallback:
+    PyObject *func
+    PyTypeObject *owner
+    simpy_cb_impl impl
+
+cdef _FastCallback _fast[8]
+cdef int _n_fast = 0
+cdef list _fast_keep = []
+
+
+cdef int register_callback(object func, type owner,
+                           simpy_cb_impl impl) except -1:
+    global _n_fast
+    if _n_fast == 8:
+        raise RuntimeError('too many fast callbacks')
+    _fast_keep.append(func)
+    _fast[_n_fast].func = <PyObject *>func
+    _fast[_n_fast].owner = <PyTypeObject *>owner
+    _fast[_n_fast].impl = impl
+    _n_fast += 1
+    return 0
+
+
+cdef inline int _call_fast(object cb, Event event) except -1:
+    # 1 if *cb* is a bound registered method and has been called, else 0.
+    cdef PyObject *func = PyMethod_GET_FUNCTION(cb)
+    cdef int j
+    for j in range(_n_fast):
+        if _fast[j].func == func:
+            owner = <object>PyMethod_GET_SELF(cb)
+            if not simpy_type_check(owner, _fast[j].owner):
+                return 0
+            _fast[j].impl(owner, event)
+            return 1
+    return 0
+
+
+cdef int run_callbacks(Event event, list callbacks) except -1:
+    # for callback in callbacks: callback(event)
+    cdef Py_ssize_t i = 0
+    if callbacks is None:
+        iter(callbacks)  # The TypeError upstream's for loop raises.
+    while i < PyList_GET_SIZE(callbacks):
+        cb = <object>PyList_GET_ITEM(callbacks, i)
+        i += 1
+        if not (PyMethod_Check(cb) and _call_fast(cb, event)):
+            cb(event)
+    return 0
 
 
 cdef inline int _env_schedule(Environment env, object event, object priority,
@@ -55,6 +129,7 @@ NORMAL: EventPriority = EventPriority(1)
 """Default priority used by events."""
 
 
+@cython.auto_pickle(False)
 cdef class Event:
     """An event that may happen at some point in time.
 
@@ -86,13 +161,11 @@ cdef class Event:
 
     """
 
-    # Attributes: ``_value`` (PENDING until triggered), ``_ok`` (set when
-    # triggered) and ``_defused`` (only present once defused). When compiled
-    # with Cython, ``events.pxd`` declares them as fields of an extension type.
+    # Attributes: ``_value`` (PENDING until triggered), ``_ok`` (assigned
+    # when triggered) and ``_defused`` (only present once defused).
 
     def __cinit__(self) -> None:
-        # Only runs when compiled (Cython passes no constructor arguments to a
-        # __cinit__ that takes none): default for subclasses that skip
+        # Upstream's class attribute default, also for subclasses that skip
         # __init__.
         self._value = PENDING
 
@@ -101,6 +174,56 @@ cdef class Event:
         """The :class:`~simpy.core.Environment` the event lives in."""
         self.callbacks: EventCallbacks = []
         """List of functions that are called when the event is processed."""
+
+    # Upstream creates _ok when the event is triggered; the C field holds
+    # None until then, and Python code sees no attribute.
+
+    @property
+    def _ok(self):
+        ok = self._ok
+        if ok is None:
+            raise _no_attribute(self, '_ok')
+        return ok
+
+    @_ok.setter
+    def _ok(self, value):
+        self._ok = value
+
+    @_ok.deleter
+    def _ok(self):
+        if self._ok is None:
+            raise _no_attribute(self, '_ok')
+        self._ok = None
+
+    # Copying and pickling see what they see of upstream's events: plain
+    # Python objects whose instance dict holds the attributes assigned so far
+    # (_value and _ok only once set).
+
+    def __getstate__(self):
+        state = {}
+        for name in _state_fields_of(type(self)):
+            try:
+                state[name] = object.__getattribute__(self, name)
+            except AttributeError:
+                pass  # Not assigned yet (_ok).
+        if self._value is PENDING:
+            del state['_value']
+        state.update(vars(self))
+        return state
+
+    def __setstate__(self, state):
+        fields = _state_fields_of(type(self))
+        d = vars(self)
+        for key, value in state.items():
+            if key in fields:
+                object.__setattr__(self, key, value)
+            else:
+                d[key] = value
+
+    def __reduce_ex__(self, protocol):
+        if protocol >= 2 or type(self).__reduce__ is not object.__reduce__:
+            return object.__reduce_ex__(self, protocol)
+        return copyreg.__newobj__, (type(self),), self.__getstate__()
 
     def __repr__(self) -> str:
         """Return the description of the event (see :meth:`_desc`) with the id
@@ -134,8 +257,9 @@ cdef class Event:
         """
         ok = self._ok
         if ok is None:
-            # Compiled builds store an unset _ok as None.
-            raise AttributeError(f'{self} has not been triggered yet')
+            # An unset _ok is stored as None; this is the error of upstream's
+            # failing attribute lookup.
+            raise _no_attribute(self, '_ok')
         return ok
 
     @property
@@ -229,17 +353,36 @@ cdef class Event:
         return Condition(self.env, Condition.any_events, [self, other])
 
 
-try:
-    # Pure-Python default for subclasses that skip Event.__init__(). A
-    # compiled Event is an extension type and sets it in __cinit__ instead.
-    Event._value = PENDING  # type: ignore
-except TypeError:
-    pass
+# The C fields that hold each event type's state, for __getstate__.
+cdef dict _state_fields = {}
+
+
+cdef int register_state_fields(type cls, tuple names) except -1:
+    _state_fields[cls] = names
+    return 0
+
+
+cdef list _state_fields_of(type cls):
+    fields = []
+    for base in reversed(cls.__mro__):
+        names = _state_fields.get(base)
+        if names is not None:
+            fields.extend(<tuple>names)
+    return fields
+
+
+cdef object _no_attribute(object obj, str name):
+    # The AttributeError that looking up a missing attribute raises.
+    msg = f"'{type(obj).__name__}' object has no attribute '{name}'"
+    if PY_VERSION_HEX >= 0x030A0000:
+        return AttributeError(msg, name=name, obj=obj)
+    return AttributeError(msg)
 
 EventCallback = Callable[[Event], None]
 EventCallbacks = List[EventCallback]
 
 
+@cython.auto_pickle(False)
 cdef class Timeout(Event):
     """A :class:`~simpy.events.Event` that gets processed after a *delay* has
     passed.
@@ -272,6 +415,7 @@ cdef class Timeout(Event):
         return f'{self.__class__.__name__}({self._delay}{value_str})'
 
 
+@cython.auto_pickle(False)
 cdef class Initialize(Event):
     """Initializes a process. Only used internally by :class:`Process`.
 
@@ -283,7 +427,10 @@ cdef class Initialize(Event):
         # NOTE: The following initialization code is inlined from
         # Event.__init__() for performance reasons.
         self.env = env
-        self.callbacks: EventCallbacks = [process._resume]
+        if isinstance(process, Process):
+            self.callbacks = [(<Process>process)._resume_bound()]
+        else:
+            self.callbacks = [process._resume]
         self._value: Any = None
 
         # The initialization events needs to be scheduled as urgent so that it
@@ -339,6 +486,7 @@ class Interruption(Event):
 ProcessGenerator = Generator[Event, Any, Any]
 
 
+@cython.auto_pickle(False)
 cdef class Process(Event):
     """Process an event yielding generator.
 
@@ -356,7 +504,8 @@ cdef class Process(Event):
     """
 
     def __init__(self, env: 'Environment', generator: ProcessGenerator):
-        if not hasattr(generator, 'throw'):
+        if type(generator) is not GeneratorType and not hasattr(
+                generator, 'throw'):
             # Implementation note: Python implementations differ in the
             # generator types they provide. Cython adds its own generator type
             # in addition to the CPython type, which renders a type check
@@ -373,8 +522,15 @@ cdef class Process(Event):
 
         self._generator = generator
 
-        # Schedule the start of the execution of the process.
-        self._target: Event = Initialize(env, self)
+        # Schedule the start of the execution of the process. Same as
+        # Initialize(env, self).
+        cdef Initialize init = Initialize.__new__(Initialize)
+        init.env = env
+        init.callbacks = [self._resume_bound()]
+        init._value = None
+        init._ok = True
+        _env_schedule(init.env, init, URGENT, _ZERO, 2)
+        self._target = init
 
     def _desc(self) -> str:
         """Return a string *Process(process_func_name)*."""
@@ -406,10 +562,24 @@ cdef class Process(Event):
         """
         Interruption(self, cause)
 
-    cpdef _resume(self, Event event):  # noqa: C901
+    def _resume(self, Event event) -> None:
         """Resumes the execution of the process with the value of *event*. If
         the process generator exits, the process itself will get triggered with
         the return value or the exception of the generator."""
+        self._do_resume(event)
+
+    cdef object _resume_bound(self):
+        # ``self._resume``; the bound method is cached while the attribute is
+        # the plain method. Dropped when the generator exits.
+        if simpy_plain(self, <PyTypeObject *>Process, _S_RESUME, _RESUME):
+            cb = self._resume_cb
+            if cb is None:
+                cb = self._resume_cb = simpy_method_new(_RESUME, self)
+            return cb
+        return getattr(self, '_resume')
+
+    cdef int _do_resume(self, Event event) except -1:  # noqa: C901
+        cdef int returned = 0
         env = self.env
         # Mark the current process as active.
         env._active_proc = self
@@ -418,7 +588,8 @@ cdef class Process(Event):
             # Get next event from process
             try:
                 if event._ok:
-                    next_event = self._generator.send(event._value)
+                    next_event = simpy_send(self._generator, event._value,
+                                            _S_SEND, &returned)
                 else:
                     # The process has no choice but to handle the failed event
                     # (or fail itself).
@@ -434,6 +605,7 @@ cdef class Process(Event):
                 # Process has terminated.
                 self._ok = True
                 self._value = e.args[0] if len(e.args) else None
+                self._resume_cb = None
                 _env_schedule(env, self, NORMAL, _ZERO, 1)
                 next_event = None
                 break
@@ -444,6 +616,16 @@ cdef class Process(Event):
                 # does not add any useful information.
                 e.__traceback__ = e.__traceback__.tb_next  # type: ignore
                 self._value = e
+                self._resume_cb = None
+                _env_schedule(env, self, NORMAL, _ZERO, 1)
+                next_event = None
+                break
+
+            if returned:
+                # Process has terminated (the generator returned).
+                self._ok = True
+                self._value = next_event
+                self._resume_cb = None
                 _env_schedule(env, self, NORMAL, _ZERO, 1)
                 next_event = None
                 break
@@ -468,13 +650,29 @@ cdef class Process(Event):
             if callbacks is not None:
                 # The event has not yet been triggered. Register callback
                 # to resume the process if that happens.
-                callbacks.append(self._resume)
+                callbacks.append(self._resume_bound())
                 break
             # The event has already been processed: resume with its value.
             event = next_event
 
         self._target = next_event
         env._active_proc = None
+        return 0
+
+
+cdef object _RESUME = Process.__dict__['_resume']
+cdef object _S_RESUME = '_resume'
+cdef object _S_SEND = 'send'
+
+
+cdef int _resume_impl(object owner, Event event) except -1:
+    return (<Process>owner)._do_resume(event)
+
+
+register_callback(_RESUME, Process, _resume_impl)
+register_state_fields(Event, ('env', 'callbacks', '_value', '_ok'))
+register_state_fields(Timeout, ('_delay',))
+register_state_fields(Process, ('_generator', '_target'))
 
 
 class ConditionValue:
@@ -521,6 +719,7 @@ class ConditionValue:
         return dict((event, event._value) for event in self.events)
 
 
+@cython.auto_pickle(False)
 cdef class Condition(Event):
     """An event that gets triggered once the condition function *evaluate*
     returns ``True`` on the given list of *events*.
@@ -685,3 +884,6 @@ def _describe_frame(frame: FrameType) -> str:
         f'  File "{filename}", line {lineno}, in {name}\n'
         f'    {line.strip()}\n'
     )
+
+
+register_state_fields(Condition, ('_evaluate', '_events', '_count'))
