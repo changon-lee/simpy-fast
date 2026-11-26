@@ -38,7 +38,7 @@ from cpython.object cimport PyObject, PyTypeObject
 
 from simpy.core cimport env_now
 from simpy.events cimport register_state_fields
-from simpy.resources.base cimport BaseResource
+from simpy.resources.base cimport BaseResource, get_init, put_exit, put_init
 
 cdef extern from "_cfast.h":
     bint simpy_plain_type(object obj, PyTypeObject *base, object name,
@@ -99,7 +99,10 @@ cdef class Request(base.Put):
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> Optional[bool]:
-        super().__exit__(exc_type, exc_value, traceback)
+        if simpy_mro_next(self, <PyTypeObject *>Request) is <PyObject *>base.Put:
+            put_exit(self)  # super().__exit__(...) runs Put.__exit__()
+        else:
+            super(Request, self).__exit__(exc_type, exc_value, traceback)
         # Don't release the resource on generator cleanups. This seems to
         # create un-claimable circular references otherwise.
         if exc_type is not GeneratorExit:
@@ -117,7 +120,10 @@ cdef class Release(base.Get):
     def __init__(self, resource: 'Resource', request: Request):
         self.request = request
         """The request (:class:`Request`) that is to be released."""
-        super().__init__(resource)
+        if simpy_mro_next(self, <PyTypeObject *>Release) is <PyObject *>base.Get:
+            get_init(self, resource)  # super().__init__(resource)
+        else:
+            super(Release, self).__init__(resource)
 
 
 @cython.auto_pickle(False)
@@ -153,7 +159,13 @@ cdef class PriorityRequest(Request):
         requests are more important) and finally the preemption flag (preempt
         requests are more important)."""
 
-        super().__init__(resource)
+        # super().__init__(resource): Request has no __init__, so Put's runs.
+        if (simpy_mro_next(self, <PyTypeObject *>PriorityRequest)
+                is <PyObject *>Request and simpy_mro_next(
+                    self, <PyTypeObject *>Request) is <PyObject *>base.Put):
+            put_init(self, resource)
+        else:
+            super(PriorityRequest, self).__init__(resource)
 
 
 class SortedQueue(list):

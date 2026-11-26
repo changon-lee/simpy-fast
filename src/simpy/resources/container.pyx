@@ -11,10 +11,14 @@ from typing import TYPE_CHECKING, Optional, Union
 
 cimport cython
 
+from cpython.object cimport PyObject, PyTypeObject
+
 from simpy.events cimport register_state_fields
 
+from simpy.resources.base cimport get_init, put_init
+
 cdef extern from "_cfast.h":
-    pass  # declares the helpers that the generated code calls
+    PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
 from simpy.core import BoundClass, Environment
 from simpy.resources import base
 
@@ -37,7 +41,10 @@ cdef class ContainerPut(base.Put):
         self.amount = amount
         """The amount of matter to be put into the container."""
 
-        super().__init__(container)
+        if simpy_mro_next(self, <PyTypeObject *>ContainerPut) is <PyObject *>base.Put:
+            put_init(self, container)  # super().__init__(container)
+        else:
+            super(ContainerPut, self).__init__(container)
 
 
 @cython.auto_pickle(False)
@@ -55,7 +62,10 @@ cdef class ContainerGet(base.Get):
         self.amount = amount
         """The amount of matter to be taken out of the container."""
 
-        super().__init__(container)
+        if simpy_mro_next(self, <PyTypeObject *>ContainerGet) is <PyObject *>base.Get:
+            get_init(self, container)  # super().__init__(container)
+        else:
+            super(ContainerGet, self).__init__(container)
 
 
 cdef class Container(base.BaseResource):

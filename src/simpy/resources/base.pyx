@@ -29,6 +29,7 @@ from simpy.events import Event, Process
 
 cdef extern from "_cfast.h":
     PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
+    bint simpy_plain(object obj, PyTypeObject *base, object name, object func)
     object simpy_list_pop(object list, Py_ssize_t i)
     int simpy_ne(object a, object b) except -1
 
@@ -63,28 +64,7 @@ cdef class Put(Event):
     """
 
     def __init__(self, resource: ResourceType):
-        cdef BaseResource res
-        cdef bint typed = isinstance(resource, BaseResource)
-        if simpy_mro_next(self, <PyTypeObject *>Put) is <PyObject *>Event:
-            # super().__init__(resource._env) runs Event.__init__(): inlined.
-            if typed:
-                self.env = (<BaseResource>resource)._env
-            else:
-                self.env = resource._env
-            self.callbacks = []
-        else:
-            super(Put, self).__init__(resource._env)
-        self.resource = resource
-        self.proc = env_active_process(self.env)
-        if typed:
-            res = <BaseResource>resource
-            res.put_queue.append(self)
-            self.callbacks.append(res._trigger_get)
-            res._trigger_put(None)
-        else:
-            resource.put_queue.append(self)
-            self.callbacks.append(resource._trigger_get)
-            resource._trigger_put(None)
+        put_init(self, resource)
 
     @classmethod
     def __class_getitem__(cls, item: object) -> object:
@@ -101,7 +81,7 @@ cdef class Put(Event):
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> Optional[bool]:
-        self.cancel()
+        _put_cancel(self)  # self.cancel()
         return None
 
     def cancel(self) -> None:
@@ -136,28 +116,7 @@ cdef class Get(Event):
     """
 
     def __init__(self, resource: ResourceType):
-        cdef BaseResource res
-        cdef bint typed = isinstance(resource, BaseResource)
-        if simpy_mro_next(self, <PyTypeObject *>Get) is <PyObject *>Event:
-            # super().__init__(resource._env) runs Event.__init__(): inlined.
-            if typed:
-                self.env = (<BaseResource>resource)._env
-            else:
-                self.env = resource._env
-            self.callbacks = []
-        else:
-            super(Get, self).__init__(resource._env)
-        self.resource = resource
-        self.proc = env_active_process(self.env)
-        if typed:
-            res = <BaseResource>resource
-            res.get_queue.append(self)
-            self.callbacks.append(res._trigger_put)
-            res._trigger_get(None)
-        else:
-            resource.get_queue.append(self)
-            self.callbacks.append(resource._trigger_put)
-            resource._trigger_get(None)
+        get_init(self, resource)
 
     @classmethod
     def __class_getitem__(cls, item: object) -> object:
@@ -174,7 +133,7 @@ cdef class Get(Event):
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> Optional[bool]:
-        self.cancel()
+        _get_cancel(self)  # self.cancel()
         return None
 
     def cancel(self) -> None:
@@ -348,6 +307,90 @@ cdef class BaseResource:
 
             if not proceed:
                 break
+
+
+cdef int put_init(Put self, object resource) except -1:
+    # Put.__init__(self, resource); subclasses call it for super().__init__().
+    cdef BaseResource res
+    cdef bint typed = isinstance(resource, BaseResource)
+    if simpy_mro_next(self, <PyTypeObject *>Put) is <PyObject *>Event:
+        # super().__init__(resource._env) runs Event.__init__(): inlined.
+        if typed:
+            self.env = (<BaseResource>resource)._env
+        else:
+            self.env = resource._env
+        self.callbacks = []
+    else:
+        super(Put, self).__init__(resource._env)
+    self.resource = resource
+    self.proc = env_active_process(self.env)
+    if typed:
+        res = <BaseResource>resource
+        res.put_queue.append(self)
+        self.callbacks.append(res._trigger_get)
+        res._trigger_put(None)
+    else:
+        resource.put_queue.append(self)
+        self.callbacks.append(resource._trigger_get)
+        resource._trigger_put(None)
+    return 0
+
+
+cdef int get_init(Get self, object resource) except -1:
+    # Get.__init__(self, resource); subclasses call it for super().__init__().
+    cdef BaseResource res
+    cdef bint typed = isinstance(resource, BaseResource)
+    if simpy_mro_next(self, <PyTypeObject *>Get) is <PyObject *>Event:
+        # super().__init__(resource._env) runs Event.__init__(): inlined.
+        if typed:
+            self.env = (<BaseResource>resource)._env
+        else:
+            self.env = resource._env
+        self.callbacks = []
+    else:
+        super(Get, self).__init__(resource._env)
+    self.resource = resource
+    self.proc = env_active_process(self.env)
+    if typed:
+        res = <BaseResource>resource
+        res.get_queue.append(self)
+        self.callbacks.append(res._trigger_put)
+        res._trigger_get(None)
+    else:
+        resource.get_queue.append(self)
+        self.callbacks.append(resource._trigger_put)
+        resource._trigger_get(None)
+    return 0
+
+
+cdef int _put_cancel(Put self) except -1:
+    # self.cancel()
+    if simpy_plain(self, <PyTypeObject *>Put, _S_CANCEL, _PUT_CANCEL):
+        if not event_triggered(self):
+            self.resource.put_queue.remove(self)
+    else:
+        self.cancel()
+    return 0
+
+
+cdef int _get_cancel(Get self) except -1:
+    # self.cancel()
+    if simpy_plain(self, <PyTypeObject *>Get, _S_CANCEL, _GET_CANCEL):
+        if not event_triggered(self):
+            self.resource.get_queue.remove(self)
+    else:
+        self.cancel()
+    return 0
+
+
+cdef int put_exit(Put self) except -1:
+    # Put.__exit__(self, ...)
+    return _put_cancel(self)
+
+
+cdef object _S_CANCEL = 'cancel'
+cdef object _PUT_CANCEL = Put.__dict__['cancel']
+cdef object _GET_CANCEL = Get.__dict__['cancel']
 
 
 cdef inline object _pop(object queue, Py_ssize_t idx):

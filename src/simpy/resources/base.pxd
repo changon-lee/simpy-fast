@@ -16,6 +16,11 @@ cdef class Get(Event):
     cdef public object proc
 
 
+cdef int put_init(Put self, object resource) except -1
+cdef int get_init(Get self, object resource) except -1
+cdef int put_exit(Put self) except -1
+
+
 cdef class BaseResource:
     cdef dict __dict__
     cdef object __weakref__

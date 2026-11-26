@@ -1359,6 +1359,112 @@ def cpdef_overrides():
 
 
 probe('cpdef overrides', cpdef_overrides)
+
+
+def mro_super_chains():
+    # Python classes between the built-in event classes in the MRO, and
+    # overridden cancel()/__exit__(): every super() hop must reach them.
+    from simpy.resources import base, container, resource, store
+    log = []
+
+    def logged(cls, name):
+        class Logged(cls):
+            def __init__(self, *args, **kwargs):
+                log.append((name, '__init__', type(self).__name__))
+                super().__init__(*args, **kwargs)
+
+            def __exit__(self, *exc):
+                log.append((name, '__exit__', exc[0] is None))
+                return super().__exit__(*exc)
+
+            def cancel(self):
+                log.append((name, 'cancel', self.triggered))
+                return super().cancel()
+        Logged.__name__ = name
+        return Logged
+
+    out = []
+
+    def make(name, *bases):
+        try:
+            return type(name, bases, {})
+        except TypeError as e:
+            out.append((name, 'TypeError', str(e)[:60]))
+            return None
+
+    LogPut = logged(base.Put, 'LogPut')
+    LogGet = logged(base.Get, 'LogGet')
+    LogRequest = logged(resource.Request, 'LogRequest')
+    LogStoreGet = logged(store.StoreGet, 'LogStoreGet')
+    classes = {
+        'SP': make('SP', store.StorePut, LogPut),
+        'CP': make('CP', container.ContainerPut, LogPut),
+        'CG': make('CG', container.ContainerGet, LogGet),
+        'RL': make('RL', resource.Release, LogGet),
+        'RQ': make('RQ', LogRequest),
+        'PR': make('PR', resource.PriorityRequest, LogRequest),
+        'PR2': make('PR2', resource.PriorityRequest, LogPut),
+        'FG': make('FG', store.FilterStoreGet, LogStoreGet),
+        'FG2': make('FG2', store.FilterStoreGet, LogGet),
+    }
+    typing_bases = {'AbstractContextManager', 'ABC', 'Generic'}  # upstream only
+    for k, v in classes.items():
+        if v is not None:
+            out.append((k, [c.__name__ for c in v.__mro__
+                            if c.__name__ not in typing_bases]))
+
+    env = simpy.Environment()
+    st = simpy.FilterStore(env, capacity=1)
+    c = simpy.Container(env, capacity=10, init=5)
+    res = simpy.PriorityResource(env, capacity=1)
+    plain = simpy.Resource(env, capacity=1)
+
+    def proc():
+        if classes['SP']:
+            ev = classes['SP'](st, 'a')
+            yield ev
+        if classes['FG']:
+            yield classes['FG'](st, lambda x: True)
+        if classes['FG2']:
+            st.put('b')
+            yield classes['FG2'](st)
+        if classes['CP']:
+            yield classes['CP'](c, 2)
+        if classes['CG']:
+            yield classes['CG'](c, 3)
+        for k in ('RQ', 'PR', 'PR2'):
+            cls = classes[k]
+            if cls is None:
+                continue
+            if k == 'RQ':
+                req = cls(plain)
+            else:
+                req = cls(res, priority=1)
+            with req:
+                yield req
+                log.append((k, 'granted', env.now))
+                yield env.timeout(1)
+        if classes['RL']:
+            req2 = plain.request()
+            yield req2
+            yield classes['RL'](plain, req2)
+        # Leave the with block while the request is still queued.
+        blocker = plain.request()
+        yield blocker
+        if classes['RQ']:
+            try:
+                with classes['RQ'](plain) as late:
+                    raise KeyError('leave')
+            except KeyError:
+                log.append(('late', late.triggered, len(plain.queue)))
+        plain.release(blocker)
+
+    env.process(proc())
+    env.run()
+    return out, log
+
+
+probe('mro super chains', mro_super_chains)
 if np is not None:
     probe('priority numpy int64', lambda: priority_order(list(np.array([3, 1, 2], dtype=np.int64))))
     probe('priority numpy float', lambda: priority_order(list(np.array([1.5, 1.2], dtype=np.float64))))

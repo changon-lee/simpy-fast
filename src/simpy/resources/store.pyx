@@ -21,10 +21,14 @@ from typing import (
 
 cimport cython
 
+from cpython.object cimport PyObject, PyTypeObject
+
 from simpy.events cimport register_state_fields
 
+from simpy.resources.base cimport get_init, put_init
+
 cdef extern from "_cfast.h":
-    pass  # declares the helpers that the generated code calls
+    PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
 from simpy.core import BoundClass, Environment
 from simpy.resources import base
 
@@ -39,7 +43,10 @@ cdef class StorePut(base.Put):
     def __init__(self, store: 'Store', item: Any):
         self.item = item
         """The item to put into the store."""
-        super().__init__(store)
+        if simpy_mro_next(self, <PyTypeObject *>StorePut) is <PyObject *>base.Put:
+            put_init(self, store)  # super().__init__(store)
+        else:
+            super(StorePut, self).__init__(store)
 
 
 @cython.auto_pickle(False)
@@ -69,7 +76,13 @@ cdef class FilterStoreGet(StoreGet):
     ):
         self.filter = filter
         """The filter function to filter items in the store."""
-        super().__init__(resource)
+        # super().__init__(resource): StoreGet has no __init__, so Get's runs.
+        if (simpy_mro_next(self, <PyTypeObject *>FilterStoreGet)
+                is <PyObject *>StoreGet and simpy_mro_next(
+                    self, <PyTypeObject *>StoreGet) is <PyObject *>base.Get):
+            get_init(self, resource)
+        else:
+            super(FilterStoreGet, self).__init__(resource)
 
 
 cdef class Store(base.BaseResource):
