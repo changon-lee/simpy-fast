@@ -53,9 +53,10 @@ class BuildExt(build_ext):
 
 setup(
     name='simpy',
-    version='4.0.2+fast2',
+    version='4.0.2+fast3',
     description='SimPy 4.0.2 with Cython-compiled core and resources',
     license='MIT',
+    license_files=['LICENSE', 'AUTHORS.rst'],
     package_dir={'': 'src'},
     packages=find_packages('src'),
     package_data={'simpy': ['*.pxd', 'py.typed'], 'simpy.resources': ['*.pxd']},
