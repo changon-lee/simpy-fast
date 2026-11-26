@@ -61,12 +61,22 @@ cdef extern from "_cheap.h":
     object simpy_heap_to_list(object heap)
 
 cdef extern from "_cfast.h":
-    bint simpy_plain(object obj, PyTypeObject *base, object name, object func)
+    bint simpy_plain_cached(object obj, PyTypeObject *base, object name,
+                            object func, SimpyAttrCache *cache)
+    int simpy_attr_watch_init(SimpyAttrWatch *w) except -1
     bint simpy_plain_type(object obj, PyTypeObject *base, object name,
                           object descr)
     object simpy_add_zero(object now, object zero)
 
 simpy_heap_ready()
+
+# The attribute cache state shared by the compiled modules (_cfast.h).
+cdef SimpyAttrWatch _attr_watch
+simpy_attr_watch_init(&_attr_watch)
+
+
+cdef SimpyAttrWatch *attr_watch():
+    return &_attr_watch
 
 Infinity: float = float('inf')  #: Convenience alias for infinity
 
@@ -313,8 +323,8 @@ cdef class Environment:
         # self.schedule(event[, priority[, delay]]) with *nargs* arguments, as
         # the event classes call it. An overriding or patched schedule() is
         # called exactly that way; otherwise the event is pushed directly.
-        if not simpy_plain(self, <PyTypeObject *>Environment, _S_SCHEDULE,
-                           _SCHEDULE):
+        if not simpy_plain_cached(self, <PyTypeObject *>Environment,
+                                  _S_SCHEDULE, _SCHEDULE, &self._acache):
             if nargs == 1:
                 self.schedule(event)
             elif nargs == 2:
@@ -385,8 +395,9 @@ cdef class Environment:
         now = self._now
         return (not self._compat and self._heap is not None
                 and (PyLong_CheckExact(now) or PyFloat_CheckExact(now))
-                and simpy_plain(self, <PyTypeObject *>Environment,
-                                _S_SCHEDULE, _SCHEDULE))
+                and simpy_plain_cached(self, <PyTypeObject *>Environment,
+                                       _S_SCHEDULE, _SCHEDULE,
+                                       &self._acache))
 
     def run(
         self, until: Optional[Union[SimTime, Event]] = None
@@ -437,8 +448,8 @@ cdef class Environment:
                 # self.step(); the plain method runs without the call. An
                 # overridden or patched step() (e.g. for tracing) is honored,
                 # also when installed during the run.
-                if simpy_plain(self, <PyTypeObject *>Environment, _S_STEP,
-                               _STEP):
+                if simpy_plain_cached(self, <PyTypeObject *>Environment,
+                                      _S_STEP, _STEP, &self._acache):
                     if self._step():
                         _raise_empty()
                 else:

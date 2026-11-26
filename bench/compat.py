@@ -1525,6 +1525,128 @@ def dict_assignment():
 
 
 probe('dict assignment', dict_assignment)
+
+
+def attribute_cache():
+    # Instance attributes that shadow step/schedule of the environment and
+    # _do_put/_trigger_get of a resource, added and removed in every way a
+    # dict can change, while the simulation runs and the plain methods have
+    # been in use before.
+    log = []
+
+    class Key(str):
+        pass
+
+    class Odd:
+        # A key that is not a str but hashes and compares like a name.
+        def __init__(self, name):
+            self.name = name
+
+        def __hash__(self):
+            return hash(self.name)
+
+        def __eq__(self, other):
+            return other == self.name
+
+    class SubDict(dict):
+        pass
+
+    env = simpy.Environment()
+    res = simpy.Resource(env, 1)
+    orig_step = env.step
+    orig_schedule = env.schedule
+    orig_do_put = res._do_put
+    orig_trigger_get = res._trigger_get
+
+    def step():
+        log.append(('step', env.now))
+        orig_step()
+
+    def schedule(event, priority=1, delay=0):
+        log.append(('schedule', env.now, type(event).__name__, priority))
+        orig_schedule(event, priority, delay)
+
+    def do_put(event):
+        log.append(('_do_put', env.now))
+        return orig_do_put(event)
+
+    def trigger_get(put_event):
+        log.append(('_trigger_get', env.now, put_event is None))
+        return orig_trigger_get(put_event)
+
+    def user(i):
+        while True:
+            with res.request() as req:
+                yield req
+                log.append(('got', i, env.now))
+                yield env.timeout(1)
+            yield env.timeout(i % 2)
+
+    for i in range(3):
+        env.process(user(i))
+
+    def name(*parts):
+        # A key equal to the name but not the interned name object.
+        return ''.join(parts)
+
+    def without(d, *names):
+        return {k: v for k, v in d.items() if k not in names}
+
+    def delete_bound(obj):
+        for k in [k for k, v in vars(obj).items()
+                  if type(v).__name__ == 'method' and k in (
+                      'process', 'timeout', 'event', 'all_of', 'any_of',
+                      'request', 'release', 'put', 'get')]:
+            delattr(obj, k)
+
+    mutations = [
+        ('setattr step', lambda: setattr(env, 'step', step)),
+        ('delattr step', lambda: delattr(env, 'step')),
+        ('vars schedule', lambda: vars(env).__setitem__(
+            name('sch', 'edule'), schedule)),
+        ('pop schedule', lambda: vars(env).pop(name('sche', 'dule'))),
+        ('setattr _do_put', lambda: setattr(res, '_do_put', do_put)),
+        ('popitem', lambda: vars(res).popitem()),
+        ('setdefault', lambda: vars(res).setdefault('_trigger_get',
+                                                    trigger_get)),
+        ('update', lambda: vars(res).update(_do_put=do_put)),
+        ('replace res dict', lambda: setattr(res, '__dict__', without(
+            vars(res), '_do_put', '_trigger_get'))),
+        ('new dict key', lambda: vars(res).__setitem__('_do_put', do_put)),
+        ('del new dict key', lambda: vars(res).__delitem__('_do_put')),
+        ('str subclass key', lambda: vars(env).__setitem__(Key('step'), step)),
+        ('del via str', lambda: vars(env).__delitem__('step')),
+        ('odd key', lambda: vars(env).__setitem__(Odd('schedule'), schedule)),
+        ('del odd key', lambda: vars(env).__delitem__('schedule')),
+        ('ior', lambda: vars(res).__ior__({'_trigger_get': trigger_get})),
+        ('del ior', lambda: delattr(res, '_trigger_get')),
+        ('dict subclass', lambda: setattr(env, '__dict__', SubDict(
+            vars(env), step=step))),
+        ('plain dict again', lambda: setattr(env, '__dict__', dict(
+            without(vars(env), 'step')))),
+        ('emptied', lambda: (delete_bound(env), delete_bound(res))),
+        ('update emptied', lambda: (vars(env).update({'step': step}),
+                                    vars(res).update({'_do_put': do_put}))),
+        ('pop emptied', lambda: (vars(env).pop('step'),
+                                 vars(res).pop('_do_put'))),
+        ('many attrs', lambda: [setattr(res, f'a{k}', k) for k in range(20)]),
+        ('many attrs + override', lambda: setattr(res, '_do_put', do_put)),
+        ('many attrs - override', lambda: delattr(res, '_do_put')),
+    ]
+
+    def mutator():
+        for label, mutate in mutations:
+            yield env.timeout(3)
+            log.append(('mutate', label, env.now))
+            mutate()
+
+    env.process(mutator())
+    env.run(until=3 * len(mutations) + 4)
+    names = ('step', 'schedule', '_do_put', '_trigger_get')
+    return log, [k for k in names if k in vars(env) or k in vars(res)]
+
+
+probe('attribute cache', attribute_cache)
 if np is not None:
     probe('priority numpy int64', lambda: priority_order(list(np.array([3, 1, 2], dtype=np.int64))))
     probe('priority numpy float', lambda: priority_order(list(np.array([1.5, 1.2], dtype=np.float64))))

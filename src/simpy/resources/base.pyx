@@ -27,11 +27,17 @@ from simpy.events cimport event_triggered, register_state_fields
 from simpy.core import BoundClass, Environment
 from simpy.events import Event, Process
 
+from simpy.core cimport SimpyAttrWatch, attr_watch
+
 cdef extern from "_cfast.h":
+    void simpy_attr_watch_use(SimpyAttrWatch *w)
     PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
     bint simpy_plain(object obj, PyTypeObject *base, object name, object func)
     object simpy_list_pop(object list, Py_ssize_t i)
     int simpy_ne(object a, object b) except -1
+
+# The attribute cache of resources (see _cfast.h).
+simpy_attr_watch_use(attr_watch())
 
 try:
     from types import GenericAlias as _GenericAlias

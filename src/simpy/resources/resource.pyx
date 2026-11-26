@@ -40,7 +40,10 @@ from simpy.core cimport env_now
 from simpy.events cimport register_state_fields
 from simpy.resources.base cimport BaseResource, get_init, put_exit, put_init
 
+from simpy.core cimport SimpyAttrWatch, attr_watch
+
 cdef extern from "_cfast.h":
+    void simpy_attr_watch_use(SimpyAttrWatch *w)
     bint simpy_plain_type(object obj, PyTypeObject *base, object name,
                           object descr)
     PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
@@ -50,6 +53,9 @@ cdef extern from "_cfast.h":
 from simpy.core import BoundClass, Environment, SimTime
 from simpy.events import Process
 from simpy.resources import base
+
+# The attribute cache of resources (see _cfast.h).
+simpy_attr_watch_use(attr_watch())
 
 _by_key = _attrgetter('key')
 

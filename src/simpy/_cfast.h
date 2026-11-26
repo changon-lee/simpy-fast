@@ -5,14 +5,152 @@
 #include <Python.h>
 #include <math.h>
 
+/* 1 when the instance dict `dict` has no key equal to `name`, decided
+ * without running Python code: it is an exact dict of at most `limit`
+ * entries whose keys are all exact str and none equals `name`. 0 when it
+ * may have one. */
+static inline int simpy_dict_absent(PyObject *dict, PyObject *name,
+                                    Py_ssize_t limit)
+{
+    Py_ssize_t len, pos = 0;
+    PyObject *key, *value;
+
+    if (!PyDict_CheckExact(dict) || PyDict_GET_SIZE(dict) > limit)
+        return 0;
+    len = PyUnicode_GET_LENGTH(name);
+    while (PyDict_Next(dict, &pos, &key, &value)) {
+        if (key == name || !PyUnicode_CheckExact(key))
+            return 0;
+        if (PyUnicode_GET_LENGTH(key) == len && PyUnicode_Compare(key, name) == 0)
+            return 0;
+    }
+    return 1;
+}
+
+/* Attribute cache. Environment and the resources keep the answers of
+ * simpy_dict_absent() for their instance dict in a SimpyAttrCache, valid while a dict watcher (Python
+ * 3.12+) has seen no change that could alter them: a key added or deleted
+ * that may equal a name asked about (by its hash), a dict cleared, cloned
+ * into or freed. Such a change bumps a global epoch, which invalidates every
+ * cache; the next check computes its answer anew. A changed value under an
+ * existing key changes no answer. */
+#if PY_VERSION_HEX >= 0x030C0000 && !defined(Py_GIL_DISABLED)
+#define SIMPY_ATTR_WATCH 1
+#endif
+
+typedef struct {
+    unsigned long long epoch;  /* bumped by simpy_attr_watch_cb() */
+    unsigned long long bloom;  /* bit (hash & 63) of every name asked about */
+    int watcher;               /* dict watcher id; -1: no caching */
+} SimpyAttrWatch;
+
+typedef struct {
+    PyObject *dict;            /* the dict answered for (identity only) */
+    unsigned long long epoch;  /* SimpyAttrWatch.epoch of the answers */
+    PyObject *names[4];        /* names asked (identity only) */
+    unsigned char absent[4];   /* their answers */
+    unsigned int next;         /* slot for the next name */
+} SimpyAttrCache;
+
+/* The state owned by simpy.core (attr_watch() there); NULL elsewhere until
+ * the module sets it. */
+static SimpyAttrWatch *simpy_attr_watch = NULL;
+
+#ifdef SIMPY_ATTR_WATCH
+static inline int simpy_attr_watch_cb(PyDict_WatchEvent event, PyObject *dict,
+                               PyObject *key, PyObject *new_value)
+{
+    SimpyAttrWatch *w = simpy_attr_watch;
+
+    (void)dict;
+    (void)new_value;
+    if (w == NULL || event == PyDict_EVENT_MODIFIED)
+        return 0;
+    if ((event == PyDict_EVENT_ADDED || event == PyDict_EVENT_DELETED) &&
+            key != NULL && PyUnicode_CheckExact(key)) {
+        Py_hash_t h = PyObject_Hash(key);  /* cached; a str hash never fails */
+        if (h != -1 && !((w->bloom >> (h & 63)) & 1))
+            return 0;
+    }
+    w->epoch++;
+    return 0;
+}
+#endif
+
+/* Set up the state (simpy.core only). Without a free watcher slot, or before
+ * Python 3.12, nothing is cached. */
+static inline int simpy_attr_watch_init(SimpyAttrWatch *w)
+{
+    w->epoch = 1;
+    w->bloom = 0;
+    w->watcher = -1;
+    simpy_attr_watch = w;
+#ifdef SIMPY_ATTR_WATCH
+    w->watcher = PyDict_AddWatcher(simpy_attr_watch_cb);
+    if (w->watcher < 0) {
+        PyErr_Clear();
+        w->watcher = -1;
+    }
+#endif
+    return 0;
+}
+
+/* Other modules use the state of simpy.core. */
+static inline void simpy_attr_watch_use(SimpyAttrWatch *w)
+{
+    simpy_attr_watch = w;
+}
+
+/* simpy_dict_absent(dict, name) remembered in *c. */
+static inline int simpy_dict_absent_cached(PyObject *dict, PyObject *name,
+                                           SimpyAttrCache *c)
+{
+#ifdef SIMPY_ATTR_WATCH
+    SimpyAttrWatch *w = simpy_attr_watch;
+    unsigned int i;
+    int r;
+
+    if (w == NULL || w->watcher < 0)
+        return simpy_dict_absent(dict, name, 8);
+    if (c->dict == dict && c->epoch == w->epoch) {
+        for (i = 0; i < 4; i++) {
+            if (c->names[i] == name)
+                return c->absent[i];
+        }
+    }
+    else {
+        if (PyDict_Watch(w->watcher, dict) < 0) {
+            PyErr_Clear();
+            return simpy_dict_absent(dict, name, 8);
+        }
+        c->dict = dict;
+        c->epoch = w->epoch;
+        for (i = 0; i < 4; i++)
+            c->names[i] = NULL;
+        c->next = 0;
+    }
+    w->bloom |= 1ULL << (PyObject_Hash(name) & 63);
+    r = simpy_dict_absent(dict, name, 64);
+    i = c->next++ & 3;
+    c->names[i] = name;
+    c->absent[i] = (unsigned char)r;
+    return r;
+#else
+    (void)c;
+    return simpy_dict_absent(dict, name, 8);
+#endif
+}
+
 /* 1 when `obj.<name>` resolves to `func`, the function stored under `name`
  * in the dict of the extension type `base` (obj is an instance of base or of
  * a subclass): no subclass overrides it, the instance dict does not shadow it
  * and attribute access is the generic one. Calling the C implementation
  * directly is then exactly what `obj.<name>(...)` does. 0 means "take the
- * Python attribute route", which is always correct. */
-static inline int simpy_plain(PyObject *obj, PyTypeObject *base,
-                              PyObject *name, PyObject *func)
+ * Python attribute route", which is always correct. `c` (or NULL) caches
+ * what the instance dict holds. */
+static inline int simpy_plain_cached(PyObject *obj, PyTypeObject *base,
+                                     PyObject *name, PyObject *func,
+                                     SimpyAttrCache *c)
 {
     PyTypeObject *tp = Py_TYPE(obj);
     Py_ssize_t off;
@@ -36,6 +174,8 @@ static inline int simpy_plain(PyObject *obj, PyTypeObject *base,
     dict = *(PyObject **)((char *)obj + off);
     if (dict == NULL || PyDict_GET_SIZE(dict) == 0)
         return 1;
+    if (c != NULL && simpy_dict_absent_cached(dict, name, c))
+        return 1;
     if (PyDict_GetItemWithError(dict, name) != NULL)
         return 0;
     if (PyErr_Occurred()) {
@@ -44,6 +184,12 @@ static inline int simpy_plain(PyObject *obj, PyTypeObject *base,
         return 0;
     }
     return 1;
+}
+
+static inline int simpy_plain(PyObject *obj, PyTypeObject *base,
+                              PyObject *name, PyObject *func)
+{
+    return simpy_plain_cached(obj, base, name, func, NULL);
 }
 
 /* Setter of the __dict__ attribute (the build adds it, see cython_config.py):
@@ -90,13 +236,14 @@ static inline int simpy_plain_type(PyObject *obj, PyTypeObject *base,
 }
 
 /* 1 when obj has no instance attribute `name`, decided without running
- * Python code: it has no instance dict, or a small exact dict whose keys are
- * all exact str and none equals `name`. 0 when it may have one. */
-static inline int simpy_no_instance_attr(PyObject *obj, PyObject *name)
+ * Python code: it has no instance dict, or simpy_dict_absent() proves it.
+ * 0 when it may have one. `c` (or NULL) caches what the dict holds. */
+static inline int simpy_no_instance_attr_cached(PyObject *obj, PyObject *name,
+                                                SimpyAttrCache *c)
 {
     PyTypeObject *tp = Py_TYPE(obj);
-    Py_ssize_t off, len, pos = 0;
-    PyObject *dict, *key, *value;
+    Py_ssize_t off;
+    PyObject *dict;
 
 #ifdef Py_TPFLAGS_MANAGED_DICT
     if (tp->tp_flags & Py_TPFLAGS_MANAGED_DICT)
@@ -110,16 +257,9 @@ static inline int simpy_no_instance_attr(PyObject *obj, PyObject *name)
     dict = *(PyObject **)((char *)obj + off);
     if (dict == NULL)
         return 1;
-    if (!PyDict_CheckExact(dict) || PyDict_GET_SIZE(dict) > 8)
-        return 0;
-    len = PyUnicode_GET_LENGTH(name);
-    while (PyDict_Next(dict, &pos, &key, &value)) {
-        if (key == name || !PyUnicode_CheckExact(key))
-            return 0;
-        if (PyUnicode_GET_LENGTH(key) == len && PyUnicode_Compare(key, name) == 0)
-            return 0;
-    }
-    return 1;
+    if (c != NULL)
+        return simpy_dict_absent_cached(dict, name, c);
+    return simpy_dict_absent(dict, name, 8);
 }
 
 /* For Cython's cpdef methods (the build inserts the call, see
@@ -129,10 +269,12 @@ static inline int simpy_no_instance_attr(PyObject *obj, PyObject *name)
  * `cfunc`. This proves the same without the lookup: attribute access is the
  * generic one, the class attribute found is that wrapper, a Cython function
  * (`cyfunc_type`, which getattr binds to obj), and no instance attribute
- * hides it. 0 leaves the decision to Cython's own check. */
-static inline int simpy_cpdef_plain(PyObject *obj, PyObject *name,
-                                    void (*cfunc)(void),
-                                    PyTypeObject *cyfunc_type)
+ * hides it. 0 leaves the decision to Cython's own check. The build passes
+ * the attribute cache of resources as `c`, NULL for other objects. */
+static inline int simpy_cpdef_plain_cached(PyObject *obj, PyObject *name,
+                                           void (*cfunc)(void),
+                                           PyTypeObject *cyfunc_type,
+                                           SimpyAttrCache *c)
 {
     PyTypeObject *tp = Py_TYPE(obj);
     PyObject *descr;
@@ -143,7 +285,14 @@ static inline int simpy_cpdef_plain(PyObject *obj, PyObject *name,
     if (descr == NULL || Py_TYPE(descr) != cyfunc_type ||
             ((PyCFunctionObject *)descr)->m_ml->ml_meth != (PyCFunction)cfunc)
         return 0;
-    return simpy_no_instance_attr(obj, name);
+    return simpy_no_instance_attr_cached(obj, name, c);
+}
+
+static inline int simpy_cpdef_plain(PyObject *obj, PyObject *name,
+                                    void (*cfunc)(void),
+                                    PyTypeObject *cyfunc_type)
+{
+    return simpy_cpdef_plain_cached(obj, name, cfunc, cyfunc_type, NULL);
 }
 
 /* The class that follows `cls` in the MRO of type(obj) (borrowed), or NULL.

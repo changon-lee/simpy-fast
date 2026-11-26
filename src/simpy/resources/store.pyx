@@ -27,10 +27,16 @@ from simpy.events cimport register_state_fields
 
 from simpy.resources.base cimport get_init, put_init
 
+from simpy.core cimport SimpyAttrWatch, attr_watch
+
 cdef extern from "_cfast.h":
+    void simpy_attr_watch_use(SimpyAttrWatch *w)
     PyObject *simpy_mro_next(object obj, PyTypeObject *cls)
 from simpy.core import BoundClass, Environment
 from simpy.resources import base
+
+# The attribute cache of resources (see _cfast.h).
+simpy_attr_watch_use(attr_watch())
 
 
 @cython.auto_pickle(False)
