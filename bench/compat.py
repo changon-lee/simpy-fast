@@ -1207,6 +1207,52 @@ def queue_event_ne():
 
 probe('queue pop allocation', queue_pop_allocation)
 probe('queue event ne', queue_event_ne)
+
+
+def instance_dicts():
+    # Attributes beyond the fields. (vars() itself differs: upstream also
+    # lists the fields there.)
+    import copy
+    env = simpy.Environment()
+    out = []
+    t = env.timeout(1)
+    out.append((t.__dict__ is t.__dict__, hasattr(t, 'extra'),
+                'extra' in vars(t)))
+    t.extra = 5
+    out.append(('extra' in vars(t), t.extra))
+    try:
+        del t.missing
+    except AttributeError:
+        out.append('del missing: AttributeError')
+    del t.extra
+    out.append((hasattr(t, 'extra'), 'extra' in vars(t)))
+    e = env.event()
+    out.append(hasattr(e, '_defused'))
+    e.defused = True
+    out.append((hasattr(e, '_defused'), '_defused' in vars(e), e.defused))
+    c = copy.copy(env.timeout(2, value='v'))
+    out.append((type(c).__name__, c.value, hasattr(c, 'extra')))
+    ev = env.event()
+    ev.tag = 'x'
+    ev2 = copy.copy(ev)
+    out.append((ev2.tag, ev2.triggered, 'tag' in vars(ev2)))
+
+    class Sub(simpy.Event):
+        pass
+
+    s = Sub(env)
+    out.append(hasattr(s, 'x'))
+    s.x = 1
+    vars(s)['y'] = 2
+    out.append((s.x, s.y, 'x' in vars(s)))
+    r = simpy.Resource(env, 1)
+    req = r.request()
+    req.note = 'n'
+    out.append((req.note, 'note' in vars(req)))
+    return out
+
+
+probe('instance dicts', instance_dicts)
 if np is not None:
     probe('priority numpy int64', lambda: priority_order(list(np.array([3, 1, 2], dtype=np.int64))))
     probe('priority numpy float', lambda: priority_order(list(np.array([1.5, 1.2], dtype=np.float64))))

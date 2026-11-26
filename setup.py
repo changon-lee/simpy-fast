@@ -8,13 +8,15 @@ import os
 from Cython.Build import cythonize
 from setuptools import Extension, find_packages, setup
 
-from cython_config import DIRECTIVES, MODULES
+from cython_config import DIRECTIVES, MODULES, lazy_instance_dicts
 
 exts = [
     Extension(m, [os.path.join('src', *m.split('.')) + '.pyx'],
               include_dirs=[os.path.join('src', 'simpy')])
     for m in MODULES
 ]
+ext_modules = cythonize(exts, quiet=True, compiler_directives=DIRECTIVES)
+lazy_instance_dicts(ext_modules, os.path.join('src', 'simpy'))
 
 setup(
     name='simpy',
@@ -24,7 +26,7 @@ setup(
     package_dir={'': 'src'},
     packages=find_packages('src'),
     package_data={'simpy': ['*.pxd', 'py.typed'], 'simpy.resources': ['*.pxd']},
-    ext_modules=cythonize(exts, quiet=True, compiler_directives=DIRECTIVES),
+    ext_modules=ext_modules,
     python_requires='>=3.6',
     zip_safe=False,
 )
