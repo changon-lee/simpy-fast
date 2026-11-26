@@ -10,7 +10,6 @@ from types import TracebackType
 from typing import (
     TYPE_CHECKING,
     ClassVar,
-    ContextManager,
     Generic,
     MutableSequence,
     Optional,
@@ -25,7 +24,7 @@ from simpy.events import PENDING, Event, Process
 ResourceType = TypeVar('ResourceType', bound='BaseResource')
 
 
-class Put(Event, ContextManager['Put'], Generic[ResourceType]):
+class Put(Event):
     """Generic event for requesting to put something into the *resource*.
 
     This event (and all of its subclasses) can act as context manager and can
@@ -41,17 +40,22 @@ class Put(Event, ContextManager['Put'], Generic[ResourceType]):
     """
 
     def __init__(self, resource: ResourceType):
-        # NOTE: Event.__init__() is inlined for performance reasons. The
-        # typed locals give Cython direct field access.
-        ev: Event = self
+        # NOTE: Event.__init__() is inlined for performance reasons.
         env: Environment = resource._env
-        ev.env = env
-        ev.callbacks = [resource._trigger_get]
+        self.env = env
+        self.callbacks = [resource._trigger_get]
         self.resource = resource
-        self.proc: Optional[Process] = env._active_proc
+        self.proc = env._active_proc
 
         resource.put_queue.append(self)
         resource._trigger_put(None)
+
+    @classmethod
+    def __class_getitem__(cls, item: object) -> type:
+        # Keeps annotations such as ``Put[Resource]`` working. The class is
+        # not a typing.Generic so that Cython can compile it to an extension
+        # type; it is still a context manager through __enter__/__exit__.
+        return cls
 
     def __enter__(self) -> 'Put':
         return self
@@ -80,7 +84,7 @@ class Put(Event, ContextManager['Put'], Generic[ResourceType]):
             self.resource.put_queue.remove(self)
 
 
-class Get(Event, ContextManager['Get'], Generic[ResourceType]):
+class Get(Event):
     """Generic event for requesting to get something from the *resource*.
 
     This event (and all of its subclasses) can act as context manager and can
@@ -96,17 +100,22 @@ class Get(Event, ContextManager['Get'], Generic[ResourceType]):
     """
 
     def __init__(self, resource: ResourceType):
-        # NOTE: Event.__init__() is inlined for performance reasons. The
-        # typed locals give Cython direct field access.
-        ev: Event = self
+        # NOTE: Event.__init__() is inlined for performance reasons.
         env: Environment = resource._env
-        ev.env = env
-        ev.callbacks = [resource._trigger_put]
+        self.env = env
+        self.callbacks = [resource._trigger_put]
         self.resource = resource
         self.proc = env._active_proc
 
         resource.get_queue.append(self)
         resource._trigger_get(None)
+
+    @classmethod
+    def __class_getitem__(cls, item: object) -> type:
+        # Keeps annotations such as ``Get[Resource]`` working. The class is
+        # not a typing.Generic so that Cython can compile it to an extension
+        # type; it is still a context manager through __enter__/__exit__.
+        return cls
 
     def __enter__(self) -> 'Get':
         return self

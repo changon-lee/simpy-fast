@@ -71,10 +71,8 @@ class Request(base.Put):
 
     """
 
-    resource: 'Resource'
-
-    #: The time at which the request succeeded.
-    usage_since: Optional[SimTime] = None
+    # ``usage_since``: the time at which the request succeeded (``None``
+    # until then).
 
     def __exit__(
         self,
@@ -88,6 +86,13 @@ class Request(base.Put):
         if exc_type is not GeneratorExit:
             self.resource.release(self)
         return None
+
+
+try:
+    # Pure-Python default; a compiled Request declares the field (None).
+    Request.usage_since = None  # type: ignore
+except TypeError:
+    pass
 
 
 class Release(base.Get):
